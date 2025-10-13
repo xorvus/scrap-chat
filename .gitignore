@@ -6,3 +6,4 @@ get_channel_id
 cpu.prof
 trace.out
 mem.prof
+.DS_Store
