@@ -47,15 +47,18 @@ go mod tidy
 main.go
 ```go
 func main() {
-    var chat platform.ChatFetcher = scrapchat.New("youtube")
+    chat, err := scrapchat.New("youtube")
+    if err != nil {
+        log.Fatalf("Failed to create scraper: %v", err)
+    }
+
     data, err := chat.FetchLiveChat("https://www.youtube.com/watch?v=jfKfPfyJRdk")
     if err != nil {
-        fmt.Println("Error:", err)
-        return
+        log.Fatalf("Error fetching live chat: %v", err)
     }
-    
+
     for msg := range data {
-        log.Printf("(%s) %s\n", msg.Author.Name, msg.Message)
+        log.Printf("[%s] %s\n", msg.Author.Name, msg.Message)
     }
 }
 ```
