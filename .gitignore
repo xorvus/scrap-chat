@@ -2,7 +2,7 @@ scrap-chat
 .idea
 get_live_chat
 get_channel_id
-benchmark
+/benchmark
 cpu.prof
 trace.out
 mem.prof
