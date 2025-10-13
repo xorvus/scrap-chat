@@ -48,7 +48,7 @@ func TestAddCookiesEmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-	file.Close()
+	_ = file.Close()
 
 	err = yt.AddCookies(cookieFile)
 	if err != nil {

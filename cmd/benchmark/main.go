@@ -28,7 +28,11 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer f.Close()
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Printf("Error closing trace file: %v", err)
+			}
+		}()
 		if err := trace.Start(f); err != nil {
 			log.Fatal(err)
 		}
@@ -40,8 +44,14 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer f.Close()
-		pprof.StartCPUProfile(f)
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Printf("Error closing CPU profile file: %v", err)
+			}
+		}()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("Error starting CPU profile: %v", err)
+		}
 		defer pprof.StopCPUProfile()
 	}
 
@@ -112,7 +122,11 @@ loop:
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer f.Close()
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Printf("Error closing memory profile file: %v", err)
+			}
+		}()
 		runtime.GC()
 		if err := pprof.WriteHeapProfile(f); err != nil {
 			log.Fatal(err)

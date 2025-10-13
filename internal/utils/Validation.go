@@ -6,7 +6,7 @@ import (
 )
 
 func CheckEmptyFields(info interface{}) []string {
-	var emptyFields []string
+	emptyFields := []string{}
 	v := reflect.ValueOf(info)
 
 	if v.Kind() == reflect.Ptr {

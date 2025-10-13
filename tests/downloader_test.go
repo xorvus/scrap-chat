@@ -15,7 +15,7 @@ func TestDownloadFile(t *testing.T) {
 	content := []byte("test file content")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer server.Close()
 
@@ -41,7 +41,7 @@ func TestDownloadFileWithContext(t *testing.T) {
 	content := []byte("test content")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer server.Close()
 
@@ -95,7 +95,7 @@ func TestDownloadFileHTTPError(t *testing.T) {
 func TestDownloadFileInvalidPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "content")
+		_, _ = io.WriteString(w, "content")
 	}))
 	defer server.Close()
 
@@ -108,7 +108,7 @@ func TestDownloadFileInvalidPath(t *testing.T) {
 func BenchmarkDownloadFile(b *testing.B) {
 	content := make([]byte, 1024*1024)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer server.Close()
 
@@ -117,6 +117,6 @@ func BenchmarkDownloadFile(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		outputPath := tempDir + "/file_" + string(rune(i)) + ".txt"
-		utils.DownloadFile(server.URL, outputPath)
+		_ = utils.DownloadFile(server.URL, outputPath)
 	}
 }

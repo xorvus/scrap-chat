@@ -9,12 +9,20 @@ type ChannelInfo struct {
 }
 
 type Author struct {
-	ID         string
-	Name       string
-	Thumbnail  string
-	URL        string
-	IsUploader bool
-	IsVerified bool
+	ID          string
+	Name        string
+	Thumbnail   string
+	URL         string
+	IsUploader  bool
+	IsVerified  bool
+	Badges      []Badge
+	Ranking     string
+}
+
+type Badge struct {
+	Tooltip    string
+	Label      string
+	IconURL    string
 }
 
 type LiveChatMessage struct {

@@ -33,7 +33,11 @@ func DownloadFileWithContext(ctx context.Context, url, outputPath string) error 
 	if err != nil {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Printf("Warning: failed to close response body: %v\n", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to download file: status %s", resp.Status)
@@ -43,7 +47,11 @@ func DownloadFileWithContext(ctx context.Context, url, outputPath string) error 
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			fmt.Printf("Warning: failed to close output file: %v\n", err)
+		}
+	}()
 
 	buf := make([]byte, bufferSize)
 	_, err = io.CopyBuffer(out, resp.Body, buf)

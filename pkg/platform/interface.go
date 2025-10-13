@@ -1,8 +1,9 @@
 package platform
 
 import (
-	"github.com/xorvus/scrap-chat/types"
 	"time"
+
+	"github.com/xorvus/scrap-chat/types"
 )
 
 type ChatFetcher interface {

@@ -73,6 +73,8 @@ type YTActions struct {
 				} `json:"authorPhoto"`
 				AuthorExternalChannelID string `json:"authorExternalChannelId"`
 				TimestampUsec           string `json:"timestampUsec"`
+				AuthorBadges            []YTAuthorBadge `json:"authorBadges"`
+				BeforeContentButtons    []YTBeforeContentButton `json:"beforeContentButtons"`
 			} `json:"liveChatTextMessageRenderer"`
 		} `json:"item"`
 	} `json:"addChatItemAction"`
@@ -122,4 +124,30 @@ type YTAuthor struct {
 	AuthorID     string
 	AuthorName   string
 	AuthorImages []YTThumbnails
+	Badges       []YTAuthorBadge
+	Ranking      string
+}
+
+type YTAuthorBadge struct {
+	LiveChatAuthorBadgeRenderer struct {
+		CustomThumbnail struct {
+			Thumbnails []YTThumbnails `json:"thumbnails"`
+		} `json:"customThumbnail"`
+		Tooltip        string `json:"tooltip"`
+		Accessibility  struct {
+			AccessibilityData struct {
+				Label string `json:"label"`
+			} `json:"accessibilityData"`
+		} `json:"accessibility"`
+	} `json:"liveChatAuthorBadgeRenderer"`
+}
+
+type YTBeforeContentButton struct {
+	ButtonViewModel struct {
+		IconName            string `json:"iconName"`
+		Title               string `json:"title"`
+		AccessibilityText   string `json:"accessibilityText"`
+		CustomBackgroundColor int    `json:"customBackgroundColor"`
+		CustomFontColor     int    `json:"customFontColor"`
+	} `json:"buttonViewModel"`
 }

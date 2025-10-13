@@ -2,10 +2,8 @@ package tests
 
 import (
 	"testing"
-	"time"
 
 	"github.com/xorvus/scrap-chat/pkg/scrapchat"
-	"github.com/xorvus/scrap-chat/types"
 )
 
 func TestNew(t *testing.T) {
@@ -78,33 +76,9 @@ func TestFetchChannelInfoInvalidURL(t *testing.T) {
 	}
 }
 
-type mockChatFetcher struct{}
-
-func (m *mockChatFetcher) AddCookies(path string) error {
-	return nil
-}
-
-func (m *mockChatFetcher) FetchLiveChat(streamID string) (<-chan *types.LiveChatMessage, error) {
-	ch := make(chan *types.LiveChatMessage)
-	close(ch)
-	return ch, nil
-}
-
-func (m *mockChatFetcher) FetchVideoComments(streamID string, date *time.Time) (<-chan *types.ChatMessage, error) {
-	ch := make(chan *types.ChatMessage)
-	close(ch)
-	return ch, nil
-}
-
-func (m *mockChatFetcher) FetchChannelInfo(path string) (*types.ChannelInfo, error) {
-	return &types.ChannelInfo{
-		ID:   "test-id",
-		Name: "Test Channel",
-	}, nil
-}
 
 func BenchmarkNew(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		scrapchat.New("youtube")
+		_, _ = scrapchat.New("youtube")
 	}
 }

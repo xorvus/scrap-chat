@@ -30,11 +30,13 @@ func (d *YtDlp) Check() error {
 		case "linux", "darwin":
 			url = fmt.Sprintf("https://github.com/yt-dlp/yt-dlp/releases/download/%s/yt-dlp", version)
 		default:
-			return fmt.Errorf("Running on unknown OS: %s\n", os)
+			return fmt.Errorf("running on unknown OS: %s", os)
 		}
 
 		if url != "" {
-			utils.DownloadFile(url, path)
+			if err := utils.DownloadFile(url, path); err != nil {
+				return fmt.Errorf("failed to download yt-dlp: %w", err)
+			}
 		}
 	}
 
@@ -49,23 +51,21 @@ func (d *YtDlp) DownloadComments(url string) {
 
 	outputFile := "comments.json"
 
-	// Create or open the output file
 	file, err := os.Create(outputFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 		os.Exit(1)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			fmt.Printf("Warning: failed to close file: %v\n", err)
+		}
+	}()
 
-	// Set up the yt-dlp command
 	cmd := exec.Command("yt-dlp", "--get-comments", "--no-download", "--print", "%(comments)j", url)
 
-	// Redirect command output to the file
 	cmd.Stdout = file
-	// Capture stderr for error handling
 	cmd.Stderr = os.Stderr
-
-	// Run the command
 	err = cmd.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running yt-dlp: %v\n", err)
