@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/xorvus/scrap-chat/pkg/platform"
-	"github.com/xorvus/scrap-chat/pkg/scrapchat"
-	"github.com/xorvus/scrap-chat/types"
 	"io"
 	"log"
 	"os"
@@ -16,9 +13,38 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/xorvus/scrap-chat/pkg/scrapchat"
+	"github.com/xorvus/scrap-chat/types"
 )
 
 var version = "dev"
+
+const (
+	// Output types
+	outputLog  = "log"
+	outputFile = "file"
+
+	// Format types
+	formatDefault = "default"
+	formatJSON    = "json"
+	formatCustom  = "custom"
+
+	// Message types
+	msgTypeLive  = "live"
+	msgTypeVideo = "video"
+	msgTypeInfo  = "info"
+
+	// File names
+	liveOutputFile = "live_output.json"
+	infoOutputFile = "info_output"
+
+	// File permissions
+	filePermission = 0644
+
+	// Time format
+	timeFormat = "2006/01/02 15:04:05"
+)
 
 func main() {
 	var showVersion bool
@@ -30,12 +56,12 @@ func main() {
 	flag.StringVar(&msgType, "t", "", "Type of scrap [live, video, info] (short form)")
 
 	var output string
-	flag.StringVar(&output, "output", "log", "Output result destination [log, file]")
-	flag.StringVar(&output, "o", "log", "Output result destination [log, file] (short form)")
+	flag.StringVar(&output, "output", outputLog, "Output result destination [log, file]")
+	flag.StringVar(&output, "o", outputLog, "Output result destination [log, file] (short form)")
 
 	var format string
-	flag.StringVar(&format, "format", "default", "Format of result [default, json, custom]")
-	flag.StringVar(&format, "f", "default", "Format of result [default, json, custom] (short form)")
+	flag.StringVar(&format, "format", formatDefault, "Format of result [default, json, custom]")
+	flag.StringVar(&format, "f", formatDefault, "Format of result [default, json, custom] (short form)")
 
 	var customOutput string
 	flag.StringVar(&customOutput, "custom-output", "", "Custom output template (e.g., \"TITLE: TITLE, ID: ID\")")
@@ -65,24 +91,30 @@ func main() {
 	}
 	url := flag.Arg(0)
 
-	var chat platform.ChatFetcher = scrapchat.New("youtube")
+	chat, err := scrapchat.New("youtube")
+	if err != nil {
+		log.Fatalf("Failed to initialize scraper: %v", err)
+	}
 
 	switch strings.ToLower(msgType) {
-	case "live":
+	case msgTypeLive:
 		liveChat, err := chat.FetchLiveChat(url)
 		if err != nil {
 			log.Fatalf("Error fetching live chat: %v", err)
 		}
-
 		handleLiveOutput(liveChat, output, format, customOutput)
-	case "video":
-		//chat.FetchVideoComments(url, nil)
-	case "info":
+
+	case msgTypeVideo:
+		// TODO: Implement video comments fetching
+		log.Fatal("Video comments fetching not yet implemented")
+
+	case msgTypeInfo:
 		result, err := chat.FetchChannelInfo(url)
 		if err != nil {
 			log.Fatalf("Error fetching info: %v", err)
 		}
 		handleInfoOutput(result, output, format, customOutput)
+
 	default:
 		fmt.Fprintln(os.Stderr, "Error: Unknown type. Use -h for help.")
 		os.Exit(1)
@@ -95,8 +127,8 @@ func handleLiveOutput(chats <-chan *types.LiveChatMessage, output, format, custo
 	isFirst := true
 	needCloseArray := false
 
-	if output == "file" && format == "json" {
-		writer, err = os.OpenFile("live_output.json", os.O_CREATE|os.O_RDWR, 0644)
+	if output == outputFile && format == formatJSON {
+		writer, err = os.OpenFile(liveOutputFile, os.O_CREATE|os.O_RDWR, filePermission)
 		if err != nil {
 			log.Fatalf("Failed to open file: %v", err)
 		}
@@ -106,10 +138,16 @@ func handleLiveOutput(chats <-chan *types.LiveChatMessage, output, format, custo
 		go func() {
 			<-c
 			if needCloseArray {
-				_, _ = writer.WriteString("\n]\n")
-				writer.Sync()
+				if _, err := writer.WriteString("\n]\n"); err != nil {
+					log.Printf("Failed to close JSON array: %v", err)
+				}
+				if err := writer.Sync(); err != nil {
+					log.Printf("Failed to sync file: %v", err)
+				}
 			}
-			writer.Close()
+			if err := writer.Close(); err != nil {
+				log.Printf("Failed to close file: %v", err)
+			}
 			fmt.Println("\nProgram interrupted. Closed JSON array in file.")
 			os.Exit(0)
 		}()
@@ -120,38 +158,44 @@ func handleLiveOutput(chats <-chan *types.LiveChatMessage, output, format, custo
 		}
 
 		if info.Size() == 0 {
-			_, err = writer.WriteString("[\n")
-			if err != nil {
+			if _, err = writer.WriteString("[\n"); err != nil {
 				log.Fatalf("Failed to write array start: %v", err)
 			}
 			isFirst = true
 		} else {
-			data, err := os.ReadFile("live_output.json")
+			data, err := os.ReadFile(liveOutputFile)
 			if err != nil {
 				log.Fatalf("Failed to read existing file: %v", err)
 			}
 
 			trimmed := bytes.TrimRight(data, "\n\r ")
-			if len(trimmed) < 2 || string(trimmed[len(trimmed)-2:]) != "]}" {
-				if string(trimmed[len(trimmed)-2:]) == "]\n" || string(trimmed[len(trimmed)-1:]) == "]" {
+			if len(trimmed) >= 2 {
+				lastTwo := string(trimmed[len(trimmed)-2:])
+				lastOne := string(trimmed[len(trimmed)-1:])
+				if lastTwo == "]" || lastOne == "]" {
 					trimmed = bytes.TrimRight(trimmed, "]\n\r ")
 				}
 			}
 
-			err = os.WriteFile("live_output.json", trimmed, 0644)
-			if err != nil {
+			if err = os.WriteFile(liveOutputFile, trimmed, filePermission); err != nil {
 				log.Fatalf("Failed to truncate file for append: %v", err)
 			}
 
-			writer.Seek(0, io.SeekEnd)
+			if _, err = writer.Seek(0, io.SeekEnd); err != nil {
+				log.Fatalf("Failed to seek to end of file: %v", err)
+			}
 			isFirst = false
 		}
 
 		needCloseArray = true
 		defer func() {
 			if needCloseArray {
-				_, _ = writer.WriteString("\n]\n")
-				writer.Close()
+				if _, err := writer.WriteString("\n]\n"); err != nil {
+					log.Printf("Failed to close JSON array: %v", err)
+				}
+				if err := writer.Close(); err != nil {
+					log.Printf("Failed to close file: %v", err)
+				}
 			}
 		}()
 	} else {
@@ -161,14 +205,14 @@ func handleLiveOutput(chats <-chan *types.LiveChatMessage, output, format, custo
 	for chat := range chats {
 		var line string
 		switch format {
-		case "json":
+		case formatJSON:
 			jsonOutput, err := json.MarshalIndent(chat, "  ", "  ")
 			if err != nil {
 				log.Fatalf("Failed to marshal JSON: %v", err)
 			}
 			line = string(jsonOutput)
 
-		case "custom":
+		case formatCustom:
 			if strings.TrimSpace(customOutput) == "" {
 				log.Fatal("Custom format selected but no custom-output template provided")
 			}
@@ -178,20 +222,25 @@ func handleLiveOutput(chats <-chan *types.LiveChatMessage, output, format, custo
 			line = fmt.Sprintf("%+v", chat)
 		}
 
-		if format == "json" && output == "file" {
+		if format == formatJSON && output == outputFile {
 			if !isFirst {
-				_, _ = writer.WriteString(",\n")
+				if _, err := writer.WriteString(",\n"); err != nil {
+					log.Fatalf("Failed to write comma separator: %v", err)
+				}
 			}
-			_, err := writer.WriteString(line)
-			if err != nil {
+			if _, err := writer.WriteString(line); err != nil {
 				log.Fatalf("Failed to write to file: %v", err)
 			}
-			fmt.Printf("%s :[%s] %s\n", time.Unix(chat.Timestamp, 0).Format("2006/01/02 15:04:05"), chat.Author.Name, chat.Message)
+			fmt.Printf("%s :[%s] %s\n", time.Unix(chat.Timestamp, 0).Format(timeFormat), chat.Author.Name, chat.Message)
 		} else {
 			if !isFirst {
-				fmt.Fprintln(writer)
+				if _, err := fmt.Fprintln(writer); err != nil {
+					log.Printf("Failed to write newline: %v", err)
+				}
 			}
-			fmt.Fprint(writer, line)
+			if _, err := fmt.Fprint(writer, line); err != nil {
+				log.Printf("Failed to write output: %v", err)
+			}
 		}
 
 		isFirst = false
@@ -202,13 +251,13 @@ func handleInfoOutput(result *types.ChannelInfo, output, format, customOutput st
 	var formatted string
 
 	switch format {
-	case "json":
+	case formatJSON:
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			log.Fatalf("Failed to marshal JSON: %v", err)
 		}
 		formatted = string(jsonOutput)
-	case "custom":
+	case formatCustom:
 		if customOutput == "" {
 			log.Fatal("Custom format selected but no custom-output template provided")
 		}
@@ -217,16 +266,16 @@ func handleInfoOutput(result *types.ChannelInfo, output, format, customOutput st
 		formatted = fmt.Sprintf("%+v", result)
 	}
 
-	if output == "file" {
+	if output == outputFile {
 		ext := "txt"
-		if format == "json" {
+		if format == formatJSON {
 			ext = "json"
 		}
-		err := os.WriteFile("info_output."+ext, []byte(formatted), 0644)
-		if err != nil {
+		filename := fmt.Sprintf("%s.%s", infoOutputFile, ext)
+		if err := os.WriteFile(filename, []byte(formatted), filePermission); err != nil {
 			log.Fatalf("Failed to write file: %v", err)
 		}
-		fmt.Println("Result written to info_output.txt")
+		fmt.Printf("Result written to %s\n", filename)
 	} else {
 		fmt.Println(formatted)
 	}

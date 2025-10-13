@@ -1,7 +1,4 @@
-
-
-
-333build:
+build:
 	@echo VERSION is: $(shell git describe --tags)
 	@go build -ldflags "-X main.version=$(shell git describe --tags)" -o scrap-chat cmd/scrap-chat/main.go
 
