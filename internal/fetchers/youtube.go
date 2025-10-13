@@ -7,10 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/PuerkitoBio/goquery"
-	"github.com/tidwall/gjson"
-	"github.com/xorvus/scrap-chat/internal/utils"
-	"github.com/xorvus/scrap-chat/types"
 	"io"
 	"log"
 	"net/http"
@@ -20,14 +16,40 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/tidwall/gjson"
+	"github.com/xorvus/scrap-chat/internal/utils"
+	"github.com/xorvus/scrap-chat/types"
 )
 
 const (
-	REG_FIRST_CHAT = `\[\[\d*,\[\[null,null,\["([^"]+)"\]\]\]\]`
+	// Regex patterns
+	REG_FIRST_CHAT = `\[\[\d+,\[\[null,null,\["([^"]+)"\]\]\]\]`
 	REG_NO_CHAT    = `\[\[\d*,\[\[\[\[.*\[null,null,\["\d*`
 	REG_CHAT       = `\d{16,}`
 	REG_SESSION    = `\w{8,}`
+
+	// YouTube URLs
+	youtubeBaseURL     = "https://www.youtube.com"
+	youtubeSignalerURL = "https://signaler-pa.youtube.com"
+	youtubeAPIURL      = "https://www.youtube.com/youtubei/v1"
+
+	maxResponseHeaderBytes = 1 << 20
+	maxResponseBodyBytes   = 2 << 20
+	bufferInitialSize      = 32 * 1024
+	readChunkSize          = 64 * 1024
+
+	defaultHTTPTimeout  = 5 * time.Second
+	reconnectDelay      = 500 * time.Millisecond
+	chatMessageDelay    = 50 * time.Millisecond
+	credRefreshInterval = 4 * time.Minute
+	maxCredRefreshes    = 4
+	avgMessageSize      = 64
+
+	// File format
+	cookieFileSeparator = "\t"
+	cookieFileFields    = 7
 )
 
 var (
@@ -40,7 +62,7 @@ var (
 	ErrStreamNotLive = errors.New("stream not live")
 	bufferPool       = sync.Pool{
 		New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, 64*1024)) // Initial 64KB capacity
+			return bytes.NewBuffer(make([]byte, 0, bufferInitialSize))
 		},
 	}
 )
@@ -59,16 +81,18 @@ type Youtube struct {
 	isInvalidationContinuationData bool
 	session                        string
 	ctx                            *context.Context
+	verbose                        bool
 }
 
-func NewYoutube(ctx *context.Context) *Youtube {
+func NewYoutube(ctx *context.Context, verbose bool) *Youtube {
 	y := &Youtube{
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				MaxResponseHeaderBytes: 1 << 20,
 			},
 		},
-		ctx: ctx,
+		ctx:     ctx,
+		verbose: verbose,
 	}
 	y.header = make(http.Header)
 	defaultHeaders(y.header)
@@ -282,15 +306,15 @@ func (y *Youtube) getConfig(url string) error {
 
 	defer resp.Body.Close()
 
-	const maxBytes = 2 << 20 // 2MB
-	limited := io.LimitReader(resp.Body, maxBytes)
+	limited := io.LimitReader(resp.Body, maxResponseBodyBytes)
 	buffer := bufferPool.Get().(*bytes.Buffer)
 
-	var chunk [128 * 1024]byte
+	chunk := make([]byte, readChunkSize)
 	defer func() {
 		resp = nil
 		buffer.Reset()
 		bufferPool.Put(buffer)
+		chunk = nil
 	}()
 
 	foundCfg := false
@@ -298,7 +322,7 @@ func (y *Youtube) getConfig(url string) error {
 	config := &types.YTCgf{}
 
 	for {
-		n, err := limited.Read(chunk[:])
+		n, err := limited.Read(chunk)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -345,13 +369,17 @@ func processConfigRegex(buffer *bytes.Buffer, regex *regexp.Regexp, config *type
 	}
 
 	jsonBytes := match[1]
-	jsonStr := *(*string)(unsafe.Pointer(&jsonBytes))
-	config.INNERTUBE_API_KEY = gjson.Get(jsonStr, "INNERTUBE_API_KEY").String()
-	config.API_KEY = gjson.Get(jsonStr, "LIVE_CHAT_BASE_TANGO_CONFIG.apiKey").String()
-	config.INNERTUBE_CLIENT_VERSION = gjson.Get(jsonStr, "INNERTUBE_CLIENT_VERSION").String()
-	config.ID_TOKEN = gjson.Get(jsonStr, "ID_TOKEN").String()
-	contextJson := gjson.Get(jsonStr, "INNERTUBE_CONTEXT").Raw
-	if err := json.Unmarshal([]byte(contextJson), &config.INNERTUBE_CONTEXT); err != nil {
+	config.INNERTUBE_API_KEY = gjson.GetBytes(jsonBytes, "INNERTUBE_API_KEY").String()
+	config.API_KEY = gjson.GetBytes(jsonBytes, "LIVE_CHAT_BASE_TANGO_CONFIG.apiKey").String()
+	config.INNERTUBE_CLIENT_VERSION = gjson.GetBytes(jsonBytes, "INNERTUBE_CLIENT_VERSION").String()
+	config.ID_TOKEN = gjson.GetBytes(jsonBytes, "ID_TOKEN").String()
+
+	contextResult := gjson.GetBytes(jsonBytes, "INNERTUBE_CONTEXT")
+	if !contextResult.Exists() {
+		return false
+	}
+
+	if err := json.Unmarshal([]byte(contextResult.Raw), &config.INNERTUBE_CONTEXT); err != nil {
 		log.Printf("Error parsing INNERTUBE_CONTEXT: %v", err)
 		return false
 	}
@@ -367,10 +395,8 @@ func processInitialDataRegex(buffer *bytes.Buffer, regex *regexp.Regexp) (bool, 
 	}
 
 	jsonBytes := match[1]
-	jsonStr := *(*string)(unsafe.Pointer(&jsonBytes))
-
-	continuationStr := gjson.Get(jsonStr, "contents.twoColumnWatchNextResults.conversationBar.liveChatRenderer.header.liveChatHeaderRenderer.viewSelector.sortFilterSubMenuRenderer.subMenuItems.1.continuation.reloadContinuationData.continuation").String()
-	videoIdStr := gjson.Get(jsonStr, "currentVideoEndpoint.watchEndpoint.videoId").String()
+	continuationStr := gjson.GetBytes(jsonBytes, "contents.twoColumnWatchNextResults.conversationBar.liveChatRenderer.header.liveChatHeaderRenderer.viewSelector.sortFilterSubMenuRenderer.subMenuItems.1.continuation.reloadContinuationData.continuation").String()
+	videoIdStr := gjson.GetBytes(jsonBytes, "currentVideoEndpoint.watchEndpoint.videoId").String()
 
 	return true, continuationStr, videoIdStr
 }
@@ -386,6 +412,10 @@ func (y *Youtube) streamChat(param func([]types.YTChatMessage)) {
 			case IsRegexTrue(regFirstChat, res):
 				go func() {
 					_, match := RegexGetValue(regSession, res)
+					if len(match) == 0 {
+						log.Printf("Regex match for session failed. Response: %s\n", res)
+						return
+					}
 					y.session = match[0]
 				}()
 
@@ -461,9 +491,10 @@ func (y *Youtube) copyHeaders(req *http.Request, h http.Header) {
 	req.Header.Set("Cookie", y.cookieString)
 }
 
-// longPooling performs long polling to receive live chat updates.
 func (y *Youtube) longPooling(param func(string)) {
-	log.Println("Long pool...")
+	if y.verbose {
+		log.Println("Long pool...")
+	}
 	commentCount := 0
 	for {
 		url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=rpc&SID=%s&AID=0&CI=0&TYPE=xmlhttp&zx=%s&t=1",
@@ -482,9 +513,10 @@ func (y *Youtube) longPooling(param func(string)) {
 			log.Printf("HTTP error: %v", err)
 			return
 		}
-		defer resp.Body.Close()
 
-		log.Println("Connected, streaming...")
+		if y.verbose {
+			log.Println("Connected, streaming...")
+		}
 		reader := bufio.NewReader(resp.Body)
 
 		lastTime := time.Now().Unix()
@@ -502,25 +534,38 @@ func (y *Youtube) longPooling(param func(string)) {
 			if line == "" {
 				continue
 			}
+
+			if y.verbose {
+				log.Println(line)
+			}
 			param(line)
 			tempTime := time.Now()
 			diff := tempTime.Sub(time.Unix(lastTime, 0))
-			if diff > 4*time.Minute {
-				log.Println("Refersh.....")
+			if diff > credRefreshInterval {
+				if y.verbose {
+					log.Println("Refresh credentials...")
+				}
 				y.refreshCreds()
 				lastTime = time.Now().Unix()
-				commentCount += 1
+				commentCount++
 			}
 
-			if commentCount >= 4 {
-				log.Println("Reset SID...")
+			if commentCount >= maxCredRefreshes {
+				if y.verbose {
+					log.Println("Reset SID...")
+				}
 				y.getSID()
 				commentCount = 0
 				break
 			}
 		}
-		log.Println("Reconnecting...")
-		time.Sleep(500 * time.Millisecond)
+
+		resp.Body.Close()
+
+		if y.verbose {
+			log.Println("Reconnecting...")
+		}
+		time.Sleep(reconnectDelay)
 	}
 }
 
@@ -543,8 +588,9 @@ func (y *Youtube) refreshCreds() {
 		log.Printf("refresh creds HTTP error: %v", err)
 		return
 	}
-
-	log.Printf("Refersh: %d\n", resp.StatusCode)
+	if y.verbose {
+		log.Printf("Refersh: %d\n", resp.StatusCode)
+	}
 
 	resp.Body.Close()
 
@@ -586,15 +632,11 @@ func (y *Youtube) getSID() {
 		return
 	}
 
-	// Salin bagian yang relevan ke slice baru dan bebaskan memori body asli
 	jsonPart := make([]byte, len(body)-idx)
 	copy(jsonPart, body[idx:])
-	body = nil // Membebaskan memori body yang besar lebih awal
-
-	// Parsing JSON secara streaming untuk mengurangi alokasi memori
+	body = nil
 	decoder := json.NewDecoder(bytes.NewReader(jsonPart))
 
-	// Periksa token awal sebagai array
 	t, err := decoder.Token()
 	if err != nil {
 		log.Printf("getSID JSON decode error: %v", err)
@@ -605,7 +647,6 @@ func (y *Youtube) getSID() {
 		return
 	}
 
-	// Iterasi melalui setiap elemen array terluar
 	for decoder.More() {
 		var elem []interface{}
 		if err := decoder.Decode(&elem); err != nil {
@@ -628,7 +669,6 @@ func (y *Youtube) getSID() {
 	log.Println("getSID: SID not found in the JSON structure")
 }
 
-// chooseServer selects the server for the live chat session.
 func (y *Youtube) chooseServer() {
 	url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/v1/chooseServer?key=%s", y.config.API_KEY)
 	rawPayload := fmt.Sprintf("[[null,null,null,[9,5],null,[[\"youtube_live_chat_web\"],[1],[[[\"chat~%s\"]]]]],null,null,0]", y.videoId)
@@ -696,15 +736,21 @@ func (y *Youtube) sendMessage(opts *MessageOptions) ([]types.YTChatMessage, erro
 
 	encoder := json.NewEncoder(buf)
 	if err := encoder.Encode(ytPayloadMessageLive); err != nil {
+		bufferPool.Put(buf)
 		return nil, fmt.Errorf("sendMessage: marshal error: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", url, buf)
+	payload := make([]byte, buf.Len())
+	copy(payload, buf.Bytes())
 	bufferPool.Put(buf)
 
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("sendMessage: request error: %w", err)
 	}
+
+	y.copyHeaders(req, y.header)
+	req.Header.Set("Content-Type", "application/json")
 
 	res, err := y.httpClient.Do(req)
 	if err != nil {

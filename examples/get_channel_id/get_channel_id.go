@@ -2,18 +2,26 @@ package main
 
 import (
 	"fmt"
-	"github.com/xorvus/scrap-chat/pkg/platform"
+	"log"
+
 	"github.com/xorvus/scrap-chat/pkg/scrapchat"
 )
 
-func main() {
-	var chat platform.ChatFetcher = scrapchat.New("youtube")
+const defaultChannel = "https://www.youtube.com/@LofiGirl"
 
-	channelInfo, err := chat.FetchChannelInfo("https://www.youtube.com/@TheJooomers")
+func main() {
+	chat, err := scrapchat.New("youtube")
 	if err != nil {
-		fmt.Println("Error fetching channel info:", err)
-		return
+		log.Fatalf("Failed to create scraper: %v", err)
 	}
 
-	fmt.Printf("ChannelID: %s, ChannelName: %s, URL: %s", channelInfo.ID, channelInfo.Name, channelInfo.URL)
+	channelInfo, err := chat.FetchChannelInfo(defaultChannel)
+	if err != nil {
+		log.Fatalf("Error fetching channel info: %v", err)
+	}
+
+	fmt.Printf("Channel ID: %s\n", channelInfo.ID)
+	fmt.Printf("Channel Name: %s\n", channelInfo.Name)
+	fmt.Printf("Channel URL: %s\n", channelInfo.URL)
+	fmt.Printf("Description: %s\n", channelInfo.Description)
 }
