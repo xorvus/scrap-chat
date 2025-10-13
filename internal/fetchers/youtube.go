@@ -518,121 +518,167 @@ func processInitialDataRegex(buffer *bytes.Buffer, regex *regexp.Regexp) (bool, 
 
 func (y *Youtube) streamChat(param func([]types.YTChatMessage)) {
 	if y.isInvalidationData {
-		lastTime := time.Now().Unix()
-		y.longPolling(func(res string) {
-			tempTime := time.Now()
-			diff := tempTime.Sub(time.Unix(lastTime, 0))
-
-			if y.verbose && int(diff.Seconds())%30 == 0 {
-				y.LogStreamSummary()
-			}
-
-			switch {
-			case IsRegexTrue(regFirstChat, res):
-				log.Printf("[STREAM] Detected first chat message, processing session")
-				go func() {
-					_, match := RegexGetValue(regSession, res)
-					if len(match) == 0 {
-						log.Printf("[STREAM] Regex match for session failed. Response length: %d, preview: %.100s", len(res), res)
-						return
-					}
-					y.session = match[0]
-					log.Printf("[STREAM] Session extracted: %s", y.session)
-				}()
-
-				res, err := y.sendMessage(&MessageOptions{
-					Timestamp: "",
-					IsTimeout: false,
-					IsFirst:   true,
-				})
-				if err != nil {
-					log.Printf("[STREAM] Error sending first chat message: %v", err)
-				} else {
-					param(res)
-				}
-
-			case diff >= 10*time.Second:
-				log.Printf("[STREAM] Sending timeout message after %v inactivity", diff)
-				res, err := y.sendMessage(&MessageOptions{
-					Timestamp: "",
-					IsTimeout: true,
-					IsFirst:   false,
-				})
-				if err != nil {
-					log.Printf("[STREAM] Error sending timeout message: %v", err)
-				} else {
-					param(res)
-				}
-
-			case IsRegexTrue(regNoChat, res):
-				if y.verbose {
-					log.Printf("[STREAM] No chat detected")
-				}
-
-			case func() bool {
-				ok, match := RegexGetValue(regChat, res)
-				if ok {
-					if y.verbose {
-						log.Printf("[STREAM] Chat message detected with timestamp: %s", match[0])
-					}
-					res, err := y.sendMessage(&MessageOptions{
-						Timestamp: match[0],
-						IsTimeout: false,
-						IsFirst:   false,
-					})
-					if err != nil {
-						log.Printf("[STREAM] Error sending chat message: %v", err)
-					} else {
-						param(res)
-					}
-				}
-				return ok
-			}():
-
-			default:
-				y.logStreamError(fmt.Errorf("undefined response pattern"), "response processing")
-
-			if len(res) == 0 {
-				log.Printf("[STREAM] Empty response received")
-			} else if len(res) < 10 {
-				log.Printf("[STREAM] Very short response: '%s' (length: %d)", res, len(res))
-			} else if strings.Contains(res, "error") || strings.Contains(res, "ERROR") {
-				log.Printf("[STREAM] Error response detected: %s", res)
-			} else {
-				log.Printf("[STREAM] Undefined response format - Length: %d, Time since last: %v", len(res), diff)
-				if y.verbose {
-					preview := res
-					if len(preview) > 200 {
-						preview = preview[:200] + "..."
-					}
-					log.Printf("[STREAM] Response preview: %s", preview)
-				}
-			}
-
-				health := y.GetStreamHealth()
-				if health.ConsecutiveErrors > 3 {
-					log.Printf("[STREAM] Multiple undefined responses detected (%d), connection may be unstable", health.ConsecutiveErrors)
-				}
-			}
-
-			lastTime = tempTime.Unix()
-		})
+		y.handleInvalidationDataStream(param)
 	} else {
-		log.Printf("[STREAM] Using timed continuation mode")
-		for {
-			time.Sleep(time.Duration(y.timeout) * time.Millisecond)
-			res, err := y.sendMessage(&MessageOptions{
-				Timestamp: "",
-				IsTimeout: false,
-				IsFirst:   true,
-			})
-			if err != nil {
-				log.Printf("[STREAM] Error in timed mode: %v", err)
-				continue
+		y.handleTimedContinuationStream(param)
+	}
+}
+
+func (y *Youtube) handleInvalidationDataStream(param func([]types.YTChatMessage)) {
+	lastTime := time.Now().Unix()
+	y.longPolling(func(res string) {
+		tempTime := time.Now()
+		diff := tempTime.Sub(time.Unix(lastTime, 0))
+
+		if y.verbose && int(diff.Seconds())%30 == 0 {
+			y.LogStreamSummary()
+		}
+
+		if y.processStreamResponse(res, diff, param) {
+			lastTime = tempTime.Unix()
+		}
+	})
+}
+
+func (y *Youtube) handleTimedContinuationStream(param func([]types.YTChatMessage)) {
+	log.Printf("[STREAM] Using timed continuation mode")
+	for {
+		time.Sleep(time.Duration(y.timeout) * time.Millisecond)
+		res, err := y.sendMessage(&MessageOptions{
+			Timestamp: "",
+			IsTimeout: false,
+			IsFirst:   true,
+		})
+		if err != nil {
+			log.Printf("[STREAM] Error in timed mode: %v", err)
+			continue
+		}
+		go func() {
+			param(res)
+		}()
+	}
+}
+
+func (y *Youtube) processStreamResponse(res string, diff time.Duration, param func([]types.YTChatMessage)) bool {
+	switch {
+	case IsRegexTrue(regFirstChat, res):
+		return y.handleFirstChatResponse(res, param)
+	case diff >= 10*time.Second:
+		return y.handleTimeoutResponse(param)
+	case IsRegexTrue(regNoChat, res):
+		y.handleNoChatResponse()
+	case y.hasChatMessage(res):
+		return y.handleChatMessageResponse(res, param)
+	default:
+		y.handleUndefinedResponse(res, diff)
+		return true
+	}
+	return true
+}
+
+func (y *Youtube) handleFirstChatResponse(res string, param func([]types.YTChatMessage)) bool {
+	log.Printf("[STREAM] Detected first chat message, processing session")
+	go y.extractSessionFromResponse(res)
+
+	response, err := y.sendMessage(&MessageOptions{
+		Timestamp: "",
+		IsTimeout: false,
+		IsFirst:   true,
+	})
+	if err != nil {
+		log.Printf("[STREAM] Error sending first chat message: %v", err)
+		return false
+	}
+	param(response)
+	return true
+}
+
+func (y *Youtube) handleTimeoutResponse(param func([]types.YTChatMessage)) bool {
+	log.Printf("[STREAM] Sending timeout message after inactivity")
+	response, err := y.sendMessage(&MessageOptions{
+		Timestamp: "",
+		IsTimeout: true,
+		IsFirst:   false,
+	})
+	if err != nil {
+		log.Printf("[STREAM] Error sending timeout message: %v", err)
+		return false
+	}
+	param(response)
+	return true
+}
+
+func (y *Youtube) handleNoChatResponse() {
+	if y.verbose {
+		log.Printf("[STREAM] No chat detected")
+	}
+}
+
+func (y *Youtube) hasChatMessage(res string) bool {
+	ok, _ := RegexGetValue(regChat, res)
+	return ok
+}
+
+func (y *Youtube) handleChatMessageResponse(res string, param func([]types.YTChatMessage)) bool {
+	ok, match := RegexGetValue(regChat, res)
+	if !ok {
+		return false
+	}
+
+	if y.verbose {
+		log.Printf("[STREAM] Chat message detected with timestamp: %s", match[0])
+	}
+
+	response, err := y.sendMessage(&MessageOptions{
+		Timestamp: match[0],
+		IsTimeout: false,
+		IsFirst:   false,
+	})
+	if err != nil {
+		log.Printf("[STREAM] Error sending chat message: %v", err)
+		return false
+	}
+	param(response)
+	return true
+}
+
+func (y *Youtube) handleUndefinedResponse(res string, diff time.Duration) {
+	y.logStreamError(fmt.Errorf("undefined response pattern"), "response processing")
+
+	y.logUndefinedResponseDetails(res, diff)
+
+	health := y.GetStreamHealth()
+	if health.ConsecutiveErrors > 3 {
+		log.Printf("[STREAM] Multiple undefined responses detected (%d), connection may be unstable", health.ConsecutiveErrors)
+	}
+}
+
+func (y *Youtube) extractSessionFromResponse(res string) {
+	_, match := RegexGetValue(regSession, res)
+	if len(match) == 0 {
+		log.Printf("[STREAM] Regex match for session failed. Response length: %d, preview: %.100s", len(res), res)
+		return
+	}
+	y.session = match[0]
+	log.Printf("[STREAM] Session extracted: %s", y.session)
+}
+
+func (y *Youtube) logUndefinedResponseDetails(res string, diff time.Duration) {
+	switch {
+	case len(res) == 0:
+		log.Printf("[STREAM] Empty response received")
+	case len(res) < 10:
+		log.Printf("[STREAM] Very short response: '%s' (length: %d)", res, len(res))
+	case strings.Contains(res, "error") || strings.Contains(res, "ERROR"):
+		log.Printf("[STREAM] Error response detected: %s", res)
+	default:
+		log.Printf("[STREAM] Undefined response format - Length: %d, Time since last: %v", len(res), diff)
+		if y.verbose {
+			preview := res
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
 			}
-			go func() {
-				param(res)
-			}()
+			log.Printf("[STREAM] Response preview: %s", preview)
 		}
 	}
 }
@@ -906,113 +952,159 @@ func (y *Youtube) longPolling(param func(string)) {
 	}
 
 	y.updateStreamState(StreamStateConnecting, "Starting long polling connection")
+
+	for {
+		if err := y.establishConnection(param); err != nil {
+			if !y.shouldContinueLongPolling(err) {
+				return
+			}
+			y.handleConnectionError(err)
+			continue
+		}
+	}
+}
+
+func (y *Youtube) establishConnection(param func(string)) error {
+	y.resetStreamHealth()
+
+	url := y.buildSignalerURL()
+	resp, err := y.executeWithRetry(url, "GET")
+	if err != nil {
+		return fmt.Errorf("HTTP connection failed: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}()
+
+	y.updateStreamState(StreamStateConnected, "HTTP connection established")
+	log.Printf("[STREAM] Connected to YouTube signaling server")
+
+	return y.processStreamData(resp.Body, param)
+}
+
+func (y *Youtube) buildSignalerURL() string {
+	return fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=rpc&SID=%s&AID=0&CI=0&TYPE=xmlhttp&zx=%s&t=1",
+		y.gsessionID, y.config.API_KEY, y.sid, utils.GenerateZX())
+}
+
+func (y *Youtube) processStreamData(body io.ReadCloser, param func(string)) error {
+	reader := bufio.NewReader(body)
+	y.updateStreamState(StreamStateReading, "Starting to read from stream")
+
+	lastTime := time.Now().Unix()
 	commentCount := 0
 
 	for {
-		y.resetStreamHealth()
-
-		url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=rpc&SID=%s&AID=0&CI=0&TYPE=xmlhttp&zx=%s&t=1",
-			y.gsessionID, y.config.API_KEY, y.sid, utils.GenerateZX())
-
-		resp, err := y.executeWithRetry(url, "GET")
+		line, readTime, err := y.readStreamWithTimeout(reader)
 		if err != nil {
-			y.logStreamError(err, "HTTP connection")
-
-			if y.shouldRetryConnection(err) {
-				y.updateStreamState(StreamStateRecovering, "Retrying connection after error")
-				time.Sleep(reconnectDelay)
-				continue
-			}
-
-			y.updateStreamState(StreamStateError, "HTTP connection failed permanently")
-			log.Printf("[STREAM] HTTP error after retries: %v", err)
-			return
+			return y.handleStreamReadError(err, readTime)
 		}
 
-		y.updateStreamState(StreamStateConnected, "HTTP connection established")
-		log.Printf("[STREAM] Connected to YouTube signaling server")
-
-		reader := bufio.NewReader(resp.Body)
-		y.updateStreamState(StreamStateReading, "Starting to read from stream")
-
-		lastTime := time.Now().Unix()
-
-		for {
-			line, readTime, err := y.readStreamWithTimeout(reader)
-			if err != nil {
-				y.logStreamError(err, "stream reading")
-
-				if err == io.EOF {
-					log.Printf("[STREAM] Stream closed gracefully by server")
-					y.updateStreamState(StreamStateDisconnected, "Server closed connection")
-					break
-				} else if strings.Contains(err.Error(), "context deadline exceeded") {
-					log.Printf("[STREAM] Stream read timeout after %v, attempting recovery", readTime)
-					y.updateStreamState(StreamStateRecovering, "Stream timeout, attempting recovery")
-
-					y.streamMutex.Lock()
-					y.streamHealth.ConsecutiveErrors++
-					y.streamMutex.Unlock()
-
-					if y.streamHealth.ConsecutiveErrors >= maxConsecutiveErrors {
-						log.Printf("[STREAM] Too many consecutive timeouts (%d), giving up", y.streamHealth.ConsecutiveErrors)
-						break
-					}
-					continue
-				} else {
-					log.Printf("[STREAM] Stream read error: %v", err)
-				}
-
+		if y.processStreamLine(line, readTime, param) {
+			shouldBreak, newLastTime, newCount := y.checkCredentialRefresh(lastTime, commentCount)
+			if shouldBreak {
 				break
 			}
-
-			originalLine := line
-			line = strings.TrimSpace(line)
-			bytesRead := len(originalLine)
-
-			y.logStreamRead(line, readTime, bytesRead)
-
-			if y.streamHealth.ConsecutiveErrors > 0 {
-				y.streamMutex.Lock()
-				y.streamHealth.ConsecutiveErrors = 0
-				y.streamMutex.Unlock()
-			}
-
-			if !y.isValidResponse(line) {
-				if y.verbose {
-					log.Printf("[STREAM] Skipping invalid response")
-				}
-				continue
-			}
-
-			param(line)
-
-			tempTime := time.Now()
-			diff := tempTime.Sub(time.Unix(lastTime, 0))
-
-			if diff > credRefreshInterval {
-				log.Printf("[STREAM] Refreshing credentials after %v of inactivity", diff)
-				y.refreshCreds()
-				lastTime = time.Now().Unix()
-				commentCount++
-			}
-
-			if commentCount >= maxCredRefreshes {
-				log.Printf("[STREAM] Resetting SID after %d credential refreshes", commentCount)
-				y.getSID()
-				commentCount = 0
-				break
-			}
+			lastTime = newLastTime
+			commentCount = newCount
 		}
-
-		if err := resp.Body.Close(); err != nil {
-			y.logStreamError(err, "closing response body")
-		}
-
-		y.updateStreamState(StreamStateDisconnected, "Connection ended")
-		log.Printf("[STREAM] Connection ended, reconnecting in %v...", reconnectDelay)
-		time.Sleep(reconnectDelay)
 	}
+
+	return nil
+}
+
+func (y *Youtube) processStreamLine(line string, readTime time.Duration, param func(string)) bool {
+	originalLine := line
+	line = strings.TrimSpace(line)
+	bytesRead := len(originalLine)
+
+	y.logStreamRead(line, readTime, bytesRead)
+
+	y.resetConsecutiveErrors()
+
+	if !y.isValidResponse(line) {
+		if y.verbose {
+			log.Printf("[STREAM] Skipping invalid response")
+		}
+		return false
+	}
+
+	param(line)
+	return true
+}
+
+func (y *Youtube) resetConsecutiveErrors() {
+	if y.streamHealth.ConsecutiveErrors > 0 {
+		y.streamMutex.Lock()
+		y.streamHealth.ConsecutiveErrors = 0
+		y.streamMutex.Unlock()
+	}
+}
+
+func (y *Youtube) checkCredentialRefresh(lastTime int64, commentCount int) (bool, int64, int) {
+	tempTime := time.Now()
+	diff := tempTime.Sub(time.Unix(lastTime, 0))
+
+	if diff > credRefreshInterval {
+		log.Printf("[STREAM] Refreshing credentials after %v of inactivity", diff)
+		y.refreshCreds()
+		lastTime = time.Now().Unix()
+		commentCount++
+	}
+
+	if commentCount >= maxCredRefreshes {
+		log.Printf("[STREAM] Resetting SID after %d credential refreshes", commentCount)
+		y.getSID()
+		return true, lastTime, 0
+	}
+
+	return false, lastTime, commentCount
+}
+
+func (y *Youtube) handleStreamReadError(err error, readTime time.Duration) error {
+	y.logStreamError(err, "stream reading")
+
+	switch {
+	case err == io.EOF:
+		log.Printf("[STREAM] Stream closed gracefully by server")
+		y.updateStreamState(StreamStateDisconnected, "Server closed connection")
+		return fmt.Errorf("stream closed by server")
+
+	case strings.Contains(err.Error(), "context deadline exceeded"):
+		return y.handleStreamTimeout(readTime)
+
+	default:
+		log.Printf("[STREAM] Stream read error: %v", err)
+		return fmt.Errorf("stream read error: %w", err)
+	}
+}
+
+func (y *Youtube) handleStreamTimeout(readTime time.Duration) error {
+	log.Printf("[STREAM] Stream read timeout after %v, attempting recovery", readTime)
+	y.updateStreamState(StreamStateRecovering, "Stream timeout, attempting recovery")
+
+	y.streamMutex.Lock()
+	y.streamHealth.ConsecutiveErrors++
+	y.streamMutex.Unlock()
+
+	if y.streamHealth.ConsecutiveErrors >= maxConsecutiveErrors {
+		log.Printf("[STREAM] Too many consecutive timeouts (%d), giving up", y.streamHealth.ConsecutiveErrors)
+		return fmt.Errorf("too many consecutive timeouts")
+	}
+
+	return nil
+}
+
+func (y *Youtube) shouldContinueLongPolling(err error) bool {
+	return y.shouldRetryConnection(err)
+}
+
+func (y *Youtube) handleConnectionError(err error) {
+	y.updateStreamState(StreamStateRecovering, "Retrying connection after error")
+	log.Printf("[STREAM] Connection error: %v", err)
+	time.Sleep(reconnectDelay)
 }
 
 func (y *Youtube) refreshCreds() {
@@ -1189,7 +1281,6 @@ func (y *Youtube) sendMessage(opts *MessageOptions) ([]types.YTChatMessage, erro
 		return nil, err
 	}
 
-
 	if err := y.handleContinuation(chatMsgResp, opts); err != nil {
 		log.Printf("[SEND] Error handling continuation: %v", err)
 		return nil, err
@@ -1353,23 +1444,23 @@ func (y *Youtube) processChatMessages(chatMsgResp *types.YTChatMessagesResponse)
 
 		ytBadges := renderer.AuthorBadges
 
-	ranking := ""
-	if len(renderer.BeforeContentButtons) > 0 {
-		ranking = renderer.BeforeContentButtons[0].ButtonViewModel.Title
-	}
+		ranking := ""
+		if len(renderer.BeforeContentButtons) > 0 {
+			ranking = renderer.BeforeContentButtons[0].ButtonViewModel.Title
+		}
 
-	chatMsg := types.YTChatMessage{
-		ID: renderer.ID,
-		Author: types.YTAuthor{
-			AuthorName:   renderer.AuthorName.SimpleText,
-			AuthorID:     renderer.AuthorExternalChannelID,
-			AuthorImages: renderer.AuthorPhoto.Thumbnails,
-			Badges:       ytBadges,
-			Ranking:      ranking,
-		},
-		Timestamp: parseMicroSeconds(renderer.TimestampUsec),
-		Message:   finalMessage,
-	}
+		chatMsg := types.YTChatMessage{
+			ID: renderer.ID,
+			Author: types.YTAuthor{
+				AuthorName:   renderer.AuthorName.SimpleText,
+				AuthorID:     renderer.AuthorExternalChannelID,
+				AuthorImages: renderer.AuthorPhoto.Thumbnails,
+				Badges:       ytBadges,
+				Ranking:      ranking,
+			},
+			Timestamp: parseMicroSeconds(renderer.TimestampUsec),
+			Message:   finalMessage,
+		}
 
 		chatMessages = append(chatMessages, chatMsg)
 		y.markMessageSeen(renderer.ID)
@@ -1396,63 +1487,82 @@ func (y *Youtube) buildMessageText(textBuilder *strings.Builder, thumbnailsBuffe
 	}
 
 	for i, run := range runs {
-		switch {
-		case run.Text != "":
-			if y.verbose {
-				log.Printf("[BUILD] Run %d: Text='%s'", i, run.Text)
-			}
-
-			if i > 0 && textBuilder.Len() > 0 {
-				lastChar := textBuilder.String()[textBuilder.Len()-1]
-				if lastChar != ' ' && lastChar != '\n' && lastChar != '\t' {
-					textBuilder.WriteString(" ")
-				}
-			}
-			textBuilder.WriteString(run.Text)
-
-		case run.Emoji.IsCustomEmoji:
-			if images := run.Emoji.Image.Thumbnails; len(images) > 0 {
-				if y.verbose {
-					log.Printf("[BUILD] Run %d: Custom emoji with %d images", i, len(images))
-				}
-
-				if i > 0 && textBuilder.Len() > 0 {
-					textBuilder.WriteString(" ")
-				}
-				*thumbnailsBuffer = append(*thumbnailsBuffer, images[len(images)-1].Url)
-
-				for _, url := range *thumbnailsBuffer {
-					textBuilder.WriteString(url)
-				}
-			} else {
-				if y.verbose {
-					log.Printf("[BUILD] Run %d: Custom emoji with no images", i)
-				}
-			}
-
-		default:
-			if y.verbose {
-				log.Printf("[BUILD] Run %d: Standard emoji ID='%s'", i, run.Emoji.EmojiId)
-			}
-
-			if i > 0 && textBuilder.Len() > 0 {
-				textBuilder.WriteString(" ")
-			}
-
-			if run.Emoji.EmojiId != "" {
-				textBuilder.WriteString(run.Emoji.EmojiId)
-			}
-		}
+		y.processRun(textBuilder, thumbnailsBuffer, run, i)
 	}
 
+	y.finalizeMessageText(textBuilder)
+
+	if y.verbose {
+		finalText := textBuilder.String()
+		log.Printf("[BUILD] Final message: '%s'", finalText)
+	}
+}
+
+func (y *Youtube) processRun(textBuilder *strings.Builder, thumbnailsBuffer *[]string, run types.YTRuns, index int) {
+	switch {
+	case run.Text != "":
+		y.processTextRun(textBuilder, run.Text, index)
+	case run.Emoji.IsCustomEmoji:
+		y.processCustomEmojiRun(textBuilder, thumbnailsBuffer, run, index)
+	default:
+		y.processStandardEmojiRun(textBuilder, run, index)
+	}
+}
+
+func (y *Youtube) processTextRun(textBuilder *strings.Builder, text string, index int) {
+	if y.verbose {
+		log.Printf("[BUILD] Run %d: Text='%s'", index, text)
+	}
+
+	y.addSpacingIfNeeded(textBuilder, index)
+	textBuilder.WriteString(text)
+}
+
+func (y *Youtube) processCustomEmojiRun(textBuilder *strings.Builder, thumbnailsBuffer *[]string, run types.YTRuns, index int) {
+	if images := run.Emoji.Image.Thumbnails; len(images) > 0 {
+		if y.verbose {
+			log.Printf("[BUILD] Run %d: Custom emoji with %d images", index, len(images))
+		}
+
+		y.addSpacingIfNeeded(textBuilder, index)
+		*thumbnailsBuffer = append(*thumbnailsBuffer, images[len(images)-1].Url)
+
+		for _, url := range *thumbnailsBuffer {
+			textBuilder.WriteString(url)
+		}
+	} else {
+		if y.verbose {
+			log.Printf("[BUILD] Run %d: Custom emoji with no images", index)
+		}
+	}
+}
+
+func (y *Youtube) processStandardEmojiRun(textBuilder *strings.Builder, run types.YTRuns, index int) {
+	if y.verbose {
+		log.Printf("[BUILD] Run %d: Standard emoji ID='%s'", index, run.Emoji.EmojiId)
+	}
+
+	y.addSpacingIfNeeded(textBuilder, index)
+
+	if run.Emoji.EmojiId != "" {
+		textBuilder.WriteString(run.Emoji.EmojiId)
+	}
+}
+
+func (y *Youtube) addSpacingIfNeeded(textBuilder *strings.Builder, index int) {
+	if index > 0 && textBuilder.Len() > 0 {
+		lastChar := textBuilder.String()[textBuilder.Len()-1]
+		if lastChar != ' ' && lastChar != '\n' && lastChar != '\t' {
+			textBuilder.WriteString(" ")
+		}
+	}
+}
+
+func (y *Youtube) finalizeMessageText(textBuilder *strings.Builder) {
 	finalText := strings.TrimSpace(textBuilder.String())
 	if finalText != "" {
 		textBuilder.Reset()
 		textBuilder.WriteString(finalText)
-	}
-
-	if y.verbose {
-		log.Printf("[BUILD] Final message: '%s'", finalText)
 	}
 }
 

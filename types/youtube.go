@@ -71,9 +71,9 @@ type YTActions struct {
 				AuthorPhoto struct {
 					Thumbnails []YTThumbnails `json:"thumbnails"`
 				} `json:"authorPhoto"`
-				AuthorExternalChannelID string `json:"authorExternalChannelId"`
-				TimestampUsec           string `json:"timestampUsec"`
-				AuthorBadges            []YTAuthorBadge `json:"authorBadges"`
+				AuthorExternalChannelID string                  `json:"authorExternalChannelId"`
+				TimestampUsec           string                  `json:"timestampUsec"`
+				AuthorBadges            []YTAuthorBadge         `json:"authorBadges"`
 				BeforeContentButtons    []YTBeforeContentButton `json:"beforeContentButtons"`
 			} `json:"liveChatTextMessageRenderer"`
 		} `json:"item"`
@@ -133,8 +133,8 @@ type YTAuthorBadge struct {
 		CustomThumbnail struct {
 			Thumbnails []YTThumbnails `json:"thumbnails"`
 		} `json:"customThumbnail"`
-		Tooltip        string `json:"tooltip"`
-		Accessibility  struct {
+		Tooltip       string `json:"tooltip"`
+		Accessibility struct {
 			AccessibilityData struct {
 				Label string `json:"label"`
 			} `json:"accessibilityData"`
@@ -144,10 +144,10 @@ type YTAuthorBadge struct {
 
 type YTBeforeContentButton struct {
 	ButtonViewModel struct {
-		IconName            string `json:"iconName"`
-		Title               string `json:"title"`
-		AccessibilityText   string `json:"accessibilityText"`
+		IconName              string `json:"iconName"`
+		Title                 string `json:"title"`
+		AccessibilityText     string `json:"accessibilityText"`
 		CustomBackgroundColor int    `json:"customBackgroundColor"`
-		CustomFontColor     int    `json:"customFontColor"`
+		CustomFontColor       int    `json:"customFontColor"`
 	} `json:"buttonViewModel"`
 }

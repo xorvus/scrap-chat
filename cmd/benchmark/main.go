@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/xorvus/scrap-chat/pkg/scrapchat"
+	"github.com/xorvus/scrap-chat/types"
 )
 
 var (
@@ -23,49 +24,21 @@ var (
 func main() {
 	flag.Parse()
 
-	if *tracefile != "" {
-		f, err := os.Create(*tracefile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer func() {
-			if err := f.Close(); err != nil {
-				log.Printf("Error closing trace file: %v", err)
-			}
-		}()
-		if err := trace.Start(f); err != nil {
-			log.Fatal(err)
-		}
-		defer trace.Stop()
+	if err := validateArguments(); err != nil {
+		log.Fatal(err)
 	}
 
-	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer func() {
-			if err := f.Close(); err != nil {
-				log.Printf("Error closing CPU profile file: %v", err)
-			}
-		}()
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatalf("Error starting CPU profile: %v", err)
-		}
-		defer pprof.StopCPUProfile()
+	if err := setupTracing(); err != nil {
+		log.Fatal(err)
 	}
+	defer cleanupTracing()
 
-	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: benchmark [options] <channel_url>")
-		flag.PrintDefaults()
-		os.Exit(1)
+	if err := setupCPUProfile(); err != nil {
+		log.Fatal(err)
 	}
+	defer cleanupCPUProfile()
 
 	channelURL := flag.Arg(0)
-
-	log.Printf("Starting benchmark for %d seconds", *duration)
-	startMem := getMemStats()
-	startTime := time.Now()
 
 	chat, err := scrapchat.New("youtube", false)
 	if err != nil {
@@ -77,62 +50,179 @@ func main() {
 		log.Fatalf("Error fetching live chat: %v", err)
 	}
 
-	msgCount := 0
-	timeout := time.After(time.Duration(*duration) * time.Second)
-	memSamples := []memStat{}
+	result := runBenchmark(data)
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	printResults(result)
 
-loop:
-	for {
-		select {
-		case msg, ok := <-data:
-			if !ok {
-				break loop
-			}
-			msgCount++
-			_ = msg
-		case <-ticker.C:
-			memSamples = append(memSamples, getMemStats())
-		case <-timeout:
-			break loop
+	if err := writeMemoryProfile(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func validateArguments() error {
+	if flag.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: benchmark [options] <channel_url>")
+		flag.PrintDefaults()
+		return fmt.Errorf("channel URL is required")
+	}
+	return nil
+}
+
+func setupTracing() error {
+	if *tracefile == "" {
+		return nil
+	}
+
+	f, err := os.Create(*tracefile)
+	if err != nil {
+		return err
+	}
+
+	if err := trace.Start(f); err != nil {
+		if err := f.Close(); err != nil {
+			log.Printf("Error closing trace file: %v", err)
+		}
+		return err
+	}
+
+	traceFile = f
+	return nil
+}
+
+func cleanupTracing() {
+	if traceFile != nil {
+		trace.Stop()
+		if err := traceFile.Close(); err != nil {
+			log.Printf("Error closing trace file: %v", err)
 		}
 	}
+}
+
+func setupCPUProfile() error {
+	if *cpuprofile == "" {
+		return nil
+	}
+
+	f, err := os.Create(*cpuprofile)
+	if err != nil {
+		return err
+	}
+
+	if err := pprof.StartCPUProfile(f); err != nil {
+		if err := f.Close(); err != nil {
+			log.Printf("Error closing CPU profile file: %v", err)
+		}
+		return fmt.Errorf("error starting CPU profile: %w", err)
+	}
+
+	cpuProfileFile = f
+	return nil
+}
+
+func cleanupCPUProfile() {
+	if cpuProfileFile != nil {
+		pprof.StopCPUProfile()
+		if err := cpuProfileFile.Close(); err != nil {
+			log.Printf("Error closing CPU profile file: %v", err)
+		}
+	}
+}
+
+func runBenchmark(data <-chan *types.LiveChatMessage) BenchmarkResult {
+	log.Printf("Starting benchmark for %d seconds", *duration)
+
+	startMem := getMemStats()
+	startTime := time.Now()
+
+	msgCount := collectMessages(data)
 
 	endTime := time.Now()
 	endMem := getMemStats()
 	duration := endTime.Sub(startTime)
 
-	log.Printf("\n=== Benchmark Results ===")
-	log.Printf("Duration: %v", duration)
-	log.Printf("Messages: %d", msgCount)
-	log.Printf("Msg/sec: %.2f", float64(msgCount)/duration.Seconds())
-	log.Printf("\n=== Memory Usage ===")
-	log.Printf("Start: %.2f MB", startMem.AllocMB)
-	log.Printf("End: %.2f MB", endMem.AllocMB)
-	log.Printf("Peak: %.2f MB", getPeakMemory(memSamples))
-	log.Printf("Average: %.2f MB", getAvgMemory(memSamples))
-	log.Printf("Diff: %.2f MB", endMem.AllocMB-startMem.AllocMB)
-	log.Printf("GC Runs: %d", endMem.NumGC-startMem.NumGC)
-	log.Printf("Goroutines: %d", runtime.NumGoroutine())
+	return BenchmarkResult{
+		Duration:     duration,
+		MessageCount: msgCount,
+		StartMem:     startMem,
+		EndMem:       endMem,
+		GoRoutines:   runtime.NumGoroutine(),
+	}
+}
 
-	if *memprofile != "" {
-		f, err := os.Create(*memprofile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer func() {
-			if err := f.Close(); err != nil {
-				log.Printf("Error closing memory profile file: %v", err)
+func collectMessages(data <-chan *types.LiveChatMessage) int {
+	msgCount := 0
+	timeout := time.After(time.Duration(*duration) * time.Second)
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case msg, ok := <-data:
+			if !ok {
+				return msgCount
 			}
-		}()
-		runtime.GC()
-		if err := pprof.WriteHeapProfile(f); err != nil {
-			log.Fatal(err)
+			msgCount++
+			_ = msg
+
+		case <-ticker.C:
+			_ = getMemStats()
+
+		case <-timeout:
+			return msgCount
 		}
 	}
 }
+
+func printResults(result BenchmarkResult) {
+	log.Printf("\n=== Benchmark Results ===")
+	log.Printf("Duration: %v", result.Duration)
+	log.Printf("Messages: %d", result.MessageCount)
+	log.Printf("Msg/sec: %.2f", float64(result.MessageCount)/result.Duration.Seconds())
+
+	log.Printf("\n=== Memory Usage ===")
+	log.Printf("Start: %.2f MB", result.StartMem.AllocMB)
+	log.Printf("End: %.2f MB", result.EndMem.AllocMB)
+	log.Printf("Diff: %.2f MB", result.EndMem.AllocMB-result.StartMem.AllocMB)
+	log.Printf("GC Runs: %d", result.EndMem.NumGC-result.StartMem.NumGC)
+	log.Printf("Goroutines: %d", result.GoRoutines)
+}
+
+func writeMemoryProfile() error {
+	if *memprofile == "" {
+		return nil
+	}
+
+	f, err := os.Create(*memprofile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Printf("Error closing memory profile file: %v", err)
+		}
+	}()
+
+	runtime.GC()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type BenchmarkResult struct {
+	Duration     time.Duration
+	MessageCount int
+	StartMem     memStat
+	EndMem       memStat
+	GoRoutines   int
+}
+
+var (
+	traceFile      *os.File
+	cpuProfileFile *os.File
+)
 
 type memStat struct {
 	AllocMB float64
@@ -148,23 +238,3 @@ func getMemStats() memStat {
 	}
 }
 
-func getPeakMemory(samples []memStat) float64 {
-	peak := 0.0
-	for _, s := range samples {
-		if s.AllocMB > peak {
-			peak = s.AllocMB
-		}
-	}
-	return peak
-}
-
-func getAvgMemory(samples []memStat) float64 {
-	if len(samples) == 0 {
-		return 0
-	}
-	sum := 0.0
-	for _, s := range samples {
-		sum += s.AllocMB
-	}
-	return sum / float64(len(samples))
-}
