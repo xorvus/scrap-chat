@@ -37,7 +37,7 @@ type YTPayloadMessageLive struct {
 }
 
 type YTWebClientInfo struct {
-	IsDocumentHidden bool `json:"IsDocumentHidden"`
+	IsDocumentHidden bool `json:"isDocumentHidden"`
 }
 
 type YTCgf struct {
