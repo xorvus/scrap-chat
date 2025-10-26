@@ -202,6 +202,9 @@ func shouldRetryConnection(err error) bool {
 		"context deadline exceeded",
 		"connection reset",
 		"unexpected EOF",
+		"EOF",                             // Plain EOF from server disconnect
+		"stream closed by server",         // Our wrapped error from handleStreamReadError
+		"max connection duration reached", // Periodic reconnection for stability
 	}
 
 	for _, pattern := range retryPatterns {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ type Youtube struct {
 	sid                string
 	httpClient         *http.Client
 	header             http.Header
+	signalerHeaders    http.Header // Cached signaler headers to avoid repeated allocation
 	cookieString       string
 	timeout            int
 	isInvalidationData bool
@@ -52,6 +54,7 @@ func New(ctx *context.Context, verbose bool) *Youtube {
 
 	log.Debug("Setting up default headers")
 	y.header = newDefaultHeaders()
+	y.signalerHeaders = buildSignalerHeaders()
 
 	log.Debug("YouTube fetcher initialized successfully")
 
@@ -187,8 +190,16 @@ func (y *Youtube) markMessageSeen(messageID string) {
 	y.streamMutex.Lock()
 	defer y.streamMutex.Unlock()
 
+	// Check if map is at capacity and trigger cleanup if needed
+	if len(y.seenMessageIDs) >= maxSeenMessageIDs {
+		y.log.Debug("seenMessageIDs map at capacity (%d), triggering cleanup", maxSeenMessageIDs)
+		y.cleanupOldMessages()
+		y.lastCleanupTime = time.Now()
+	}
+
 	y.seenMessageIDs[messageID] = time.Now()
 
+	// Regular cleanup interval
 	if time.Since(y.lastCleanupTime) > cleanupInterval {
 		y.cleanupOldMessages()
 		y.lastCleanupTime = time.Now()
@@ -196,7 +207,7 @@ func (y *Youtube) markMessageSeen(messageID string) {
 }
 
 func (y *Youtube) cleanupOldMessages() {
-	y.log.Debug("Starting cleanup of old message IDs")
+	y.log.Debug("Starting cleanup of old message IDs (current size: %d)", len(y.seenMessageIDs))
 
 	cutoff := time.Now().Add(-messageCleanupAfter)
 	deletedCount := 0
@@ -207,7 +218,34 @@ func (y *Youtube) cleanupOldMessages() {
 		}
 	}
 
-	y.log.Debug("Cleanup completed - Removed %d old message IDs", deletedCount)
+	// If still over 80% capacity after cleanup, remove oldest 50% of remaining entries
+	if len(y.seenMessageIDs) > (maxSeenMessageIDs * 4 / 5) {
+		y.log.Debug("Still at high capacity after cleanup, removing oldest entries")
+
+		// Collect all entries with timestamps
+		type entry struct {
+			id   string
+			time time.Time
+		}
+		entries := make([]entry, 0, len(y.seenMessageIDs))
+		for id, timestamp := range y.seenMessageIDs {
+			entries = append(entries, entry{id, timestamp})
+		}
+
+		// Sort by timestamp (oldest first) using stdlib - O(n log n) instead of O(n²)
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].time.Before(entries[j].time)
+		})
+
+		// Remove oldest 50%
+		removeCount := len(entries) / 2
+		for i := 0; i < removeCount; i++ {
+			delete(y.seenMessageIDs, entries[i].id)
+			deletedCount++
+		}
+	}
+
+	y.log.Debug("Cleanup completed - Removed %d message IDs (remaining: %d)", deletedCount, len(y.seenMessageIDs))
 }
 
 func (y *Youtube) resetConsecutiveErrors() {

@@ -39,10 +39,11 @@ const (
 	bufferInitialSize      = 32 * 1024
 
 	// Timing configuration
-	defaultHTTPTimeout  = 300 * time.Second
-	reconnectDelay      = 500 * time.Millisecond
-	credRefreshInterval = 4 * time.Minute
-	maxCredRefreshes    = 4
+	defaultHTTPTimeout    = 300 * time.Second
+	reconnectDelay        = 500 * time.Millisecond
+	credRefreshInterval   = 4 * time.Minute
+	maxCredRefreshes      = 4
+	maxConnectionDuration = 4*time.Minute + 58*time.Second // Reconnect 2 seconds before YouTube 5-min timeout
 
 	// Retry configuration
 	maxRetries     = 3
@@ -57,8 +58,9 @@ const (
 	// Message handling
 	initialMsgCapacity   = 128
 	messageCleanupAfter  = 30 * time.Minute
-	cleanupInterval      = 10 * time.Minute
-	defaultChannelBuffer = 100 // Default buffer size for message channels
+	cleanupInterval      = 5 * time.Minute // Cleanup more frequently for smaller batches and less lag
+	maxSeenMessageIDs    = 10000           // Maximum size of seenMessageIDs map to prevent unbounded growth
+	defaultChannelBuffer = 100             // Buffered channel for high-traffic streams (prevents message drops)
 )
 
 var (

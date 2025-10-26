@@ -81,11 +81,18 @@ func (y *Youtube) processStreamData(body io.ReadCloser, param func(string)) erro
 	reader := bufio.NewReader(body)
 	y.updateStreamState(StreamStateReading, "Starting to read from stream")
 
+	connectionStartTime := time.Now()
 	lastRefreshTime := time.Now()
 	refreshCount := 0
 	lineCount := 0
 
 	for {
+		// Check if connection has been alive too long - force reconnect for stability
+		if time.Since(connectionStartTime) > maxConnectionDuration {
+			y.log.Info("Connection duration exceeded %v, forcing reconnect for stability", maxConnectionDuration)
+			return fmt.Errorf("max connection duration reached")
+		}
+
 		lineCount++
 		line, readTime, err := y.readStreamWithTimeout(reader)
 		if err != nil {
@@ -313,7 +320,7 @@ func (y *Youtube) chooseServer() {
 		return
 	}
 
-	req.Header = buildSignalerHeaders()
+	req.Header = y.signalerHeaders
 
 	resp, err := y.httpClient.Do(req)
 	if err != nil {

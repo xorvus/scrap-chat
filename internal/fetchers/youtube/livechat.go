@@ -114,9 +114,14 @@ func (y *Youtube) processLiveChatMessages(msg chan *types.LiveChatMessage) {
 func (y *Youtube) processAndSendMessages(msg chan *types.LiveChatMessage, params []types.YTChatMessage) {
 	for i, param := range params {
 		liveChatMsg := y.convertToLiveChatMessage(param)
-		msg <- liveChatMsg
 
-		y.logVerbose("[LIVECHAT] Sent message %d/%d: ID=%s, Author=%s", i+1, len(params), param.ID, param.Author.AuthorName)
+		// Non-blocking send to prevent goroutine blocking on slow consumer
+		select {
+		case msg <- liveChatMsg:
+			y.logVerbose("[LIVECHAT] Sent message %d/%d: ID=%s, Author=%s", i+1, len(params), param.ID, param.Author.AuthorName)
+		default:
+			y.log.Warn("[LIVECHAT] Channel full, dropping message %d/%d: ID=%s", i+1, len(params), param.ID)
+		}
 	}
 }
 
@@ -197,7 +202,7 @@ func (y *Youtube) processStreamResponse(res string, param func([]types.YTChatMes
 		y.log.Debug("[Stream] Pattern matched: FIRST_CHAT")
 		y.handleFirstChatResponse(res, param)
 	case strings.Contains(res, `["noop"]`):
-		y.log.Debug("[Stream] Pattern matched: NOOP - regenerating request immediately")
+		y.log.Debug("[Stream] Pattern matched: NOOP - keep-alive signal received, continuing polling")
 	case isRegexTrue(regNoChat, res):
 		y.log.Debug("[Stream] Pattern matched: NO_CHAT")
 		y.handleNoChatResponse()
@@ -347,18 +352,12 @@ func (y *Youtube) createRequestPayload(opts *MessageOptions) ([]byte, error) {
 		ytPayloadMessageLive.InvalidationPayloadLastPublishAtUsec = &opts.Timestamp
 	}
 
-	buf := bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-
-	encoder := json.NewEncoder(buf)
-	if err := encoder.Encode(ytPayloadMessageLive); err != nil {
-		bufferPool.Put(buf)
+	// Use json.Marshal directly instead of buffer pool for simpler memory management
+	// The payload is immediately consumed by HTTP request, so no need for buffer pooling here
+	payload, err := json.Marshal(ytPayloadMessageLive)
+	if err != nil {
 		return nil, fmt.Errorf("sendMessage: marshal error: %w", err)
 	}
-
-	payload := make([]byte, buf.Len())
-	copy(payload, buf.Bytes())
-	bufferPool.Put(buf)
 
 	return payload, nil
 }
