@@ -113,7 +113,6 @@ func (y *Youtube) processAndSendMessages(msg chan *types.LiveChatMessage, params
 		msg <- liveChatMsg
 
 		y.logVerbose("[LIVECHAT] Sent message %d/%d: ID=%s, Author=%s", i+1, len(params), param.ID, param.Author.AuthorName)
-		y.sleepBetweenMessages(len(params))
 	}
 }
 
@@ -156,17 +155,6 @@ func (y *Youtube) extractLiveChatBadges(ytBadges []types.YTAuthorBadge) []types.
 	return badges
 }
 
-func (y *Youtube) sleepBetweenMessages(messageCount int) {
-	if !y.isInvalidationData {
-		sleepDuration := time.Duration(y.timeout/messageCount) * time.Millisecond
-		y.logVerbose("[LIVECHAT] Sleeping for %v between messages", sleepDuration)
-		time.Sleep(sleepDuration)
-	} else {
-		y.logVerbose("[LIVECHAT] Sleeping for 50ms between messages")
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 func (y *Youtube) streamChat(param func([]types.YTChatMessage)) {
 	if y.isInvalidationData {
 		y.handleInvalidationDataStream(param)
@@ -176,25 +164,14 @@ func (y *Youtube) streamChat(param func([]types.YTChatMessage)) {
 }
 
 func (y *Youtube) handleInvalidationDataStream(param func([]types.YTChatMessage)) {
-	lastTime := time.Now().Unix()
 	y.longPolling(func(res string) {
-		tempTime := time.Now()
-		diff := tempTime.Sub(time.Unix(lastTime, 0))
-
-		if y.log.IsVerbose() && int(diff.Seconds())%30 == 0 {
-			y.LogStreamSummary()
-		}
-
-		if y.processStreamResponse(res, diff, param) {
-			lastTime = tempTime.Unix()
-		}
+		y.processStreamResponse(res, param)
 	})
 }
 
 func (y *Youtube) handleTimedContinuationStream(param func([]types.YTChatMessage)) {
 	y.log.Info("Using timed continuation mode")
 	for {
-		time.Sleep(time.Duration(y.timeout) * time.Millisecond)
 		res, err := y.sendMessage(&MessageOptions{
 			Timestamp: "",
 			IsTimeout: false,
@@ -202,32 +179,34 @@ func (y *Youtube) handleTimedContinuationStream(param func([]types.YTChatMessage
 		})
 		if err != nil {
 			y.log.Error("Error in timed mode: %v", err)
+			time.Sleep(time.Duration(y.timeout) * time.Millisecond)
 			continue
 		}
-		go func() {
-			param(res)
-		}()
+		param(res)
+		time.Sleep(time.Duration(y.timeout) * time.Millisecond)
 	}
 }
 
-func (y *Youtube) processStreamResponse(res string, diff time.Duration, param func([]types.YTChatMessage)) bool {
+func (y *Youtube) processStreamResponse(res string, param func([]types.YTChatMessage)) {
 	switch {
 	case isRegexTrue(regFirstChat, res):
-		return y.handleFirstChatResponse(res, param)
-	case diff >= 10*time.Second:
-		return y.handleTimeoutResponse(param)
+		y.log.Debug("[Stream] Pattern matched: FIRST_CHAT")
+		y.handleFirstChatResponse(res, param)
+	case strings.Contains(res, `["noop"]`):
+		y.log.Debug("[Stream] Pattern matched: NOOP - regenerating request immediately")
 	case isRegexTrue(regNoChat, res):
+		y.log.Debug("[Stream] Pattern matched: NO_CHAT")
 		y.handleNoChatResponse()
 	case y.hasChatMessage(res):
-		return y.handleChatMessageResponse(res, param)
+		y.log.Debug("[Stream] Pattern matched: CHAT_MESSAGE")
+		y.handleChatMessageResponse(res, param)
 	default:
-		y.handleUndefinedResponse(res, diff)
-		return true
+		y.log.Debug("[Stream] Pattern matched: UNDEFINED/ERROR")
+		y.handleUndefinedResponse(res)
 	}
-	return true
 }
 
-func (y *Youtube) handleFirstChatResponse(res string, param func([]types.YTChatMessage)) bool {
+func (y *Youtube) handleFirstChatResponse(res string, param func([]types.YTChatMessage)) {
 	y.log.Debug("Detected first chat message, processing session")
 	go y.extractSessionFromResponse(res)
 
@@ -238,25 +217,9 @@ func (y *Youtube) handleFirstChatResponse(res string, param func([]types.YTChatM
 	})
 	if err != nil {
 		y.log.Error("Error sending first chat message: %v", err)
-		return false
+		return
 	}
 	param(response)
-	return true
-}
-
-func (y *Youtube) handleTimeoutResponse(param func([]types.YTChatMessage)) bool {
-	y.log.Debug("Sending timeout message after inactivity")
-	response, err := y.sendMessage(&MessageOptions{
-		Timestamp: "",
-		IsTimeout: true,
-		IsFirst:   false,
-	})
-	if err != nil {
-		y.log.Error("Error sending timeout message: %v", err)
-		return false
-	}
-	param(response)
-	return true
 }
 
 func (y *Youtube) handleNoChatResponse() {
@@ -268,13 +231,14 @@ func (y *Youtube) hasChatMessage(res string) bool {
 	return ok
 }
 
-func (y *Youtube) handleChatMessageResponse(res string, param func([]types.YTChatMessage)) bool {
+func (y *Youtube) handleChatMessageResponse(res string, param func([]types.YTChatMessage)) {
 	ok, match := regexGetValue(regChat, res)
 	if !ok {
-		return false
+		return
 	}
 
-	y.log.Debug("Chat message detected with timestamp: %s", match[0])
+	y.log.Debug("[Stream] Chat message detected with invalidation timestamp: %s", match[0])
+	y.log.Debug("[Flow 6] Sending request with invalidationPayloadLastPublishAtUsec: %s", match[0])
 
 	response, err := y.sendMessage(&MessageOptions{
 		Timestamp: match[0],
@@ -283,15 +247,14 @@ func (y *Youtube) handleChatMessageResponse(res string, param func([]types.YTCha
 	})
 	if err != nil {
 		y.log.Error("Error sending chat message: %v", err)
-		return false
+		return
 	}
 	param(response)
-	return true
 }
 
-func (y *Youtube) handleUndefinedResponse(res string, diff time.Duration) {
+func (y *Youtube) handleUndefinedResponse(res string) {
 	y.logStreamError(fmt.Errorf("undefined response pattern"), "response processing")
-	y.logUndefinedResponseDetails(res, diff)
+	y.logUndefinedResponseDetails(res)
 
 	health := y.GetStreamHealth()
 	if health.ConsecutiveErrors > 3 {
@@ -300,16 +263,17 @@ func (y *Youtube) handleUndefinedResponse(res string, diff time.Duration) {
 }
 
 func (y *Youtube) extractSessionFromResponse(res string) {
+	y.log.Debug("[Session] Attempting to extract session from first chat response")
 	_, match := regexGetValue(regSession, res)
 	if len(match) == 0 {
-		y.log.Warn("Regex match for session failed. Response length: %d", len(res))
+		y.log.Warn("[Session] Regex match for session failed. Response length: %d", len(res))
 		return
 	}
 	y.session = match[0]
-	y.log.Debug("Session extracted: %s", y.session)
+	y.log.Debug("[Session] Successfully extracted session: %s", y.session)
 }
 
-func (y *Youtube) logUndefinedResponseDetails(res string, diff time.Duration) {
+func (y *Youtube) logUndefinedResponseDetails(res string) {
 	switch {
 	case len(res) == 0:
 		y.log.Warn("Empty response received")
@@ -318,7 +282,7 @@ func (y *Youtube) logUndefinedResponseDetails(res string, diff time.Duration) {
 	case strings.Contains(res, "error") || strings.Contains(res, "ERROR"):
 		y.log.Error("Error response detected: %s", res)
 	default:
-		y.log.Warn("Undefined response format - Length: %d, Time since last: %v", len(res), diff)
+		y.log.Warn("Undefined response format - Length: %d", len(res))
 		preview := res
 		if len(preview) > 200 {
 			preview = preview[:200] + "..."
@@ -398,8 +362,9 @@ func (y *Youtube) createRequestPayload(opts *MessageOptions) ([]byte, error) {
 func (y *Youtube) executeRequestForChat(payload []byte) (*types.YTChatMessagesResponse, error) {
 	endpoint := fmt.Sprintf("%s&key=%s", liveChatEndpoint, y.config.INNERTUBE_API_KEY)
 
-	y.log.Debug("Endpoint: %s", endpoint)
-	y.log.Debug("Payload: %s", string(payload))
+	y.log.Debug("[Flow 5/6] Getting live chat messages - continuation: %s", y.continuation)
+	y.log.Debug("[Flow 5/6] Endpoint: %s", endpoint)
+	y.log.Debug("[Flow 5/6] Payload: %s", string(payload))
 
 	resp, err := y.executeRequest(endpoint, "POST", bytes.NewReader(payload))
 	if err != nil {

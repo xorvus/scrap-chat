@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -70,6 +71,7 @@ func (y *Youtube) establishConnection(param func(string)) error {
 }
 
 func (y *Youtube) buildSignalerURL() string {
+	y.log.Debug("[Flow 4] Building long polling URL - gsessionid=%s, SID=%s", y.gsessionID, y.sid)
 	return fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=rpc&SID=%s&AID=0&CI=0&TYPE=xmlhttp&zx=%s&t=1",
 		y.gsessionID, y.config.API_KEY, y.sid, utils.GenerateZX())
 }
@@ -80,8 +82,8 @@ func (y *Youtube) processStreamData(body io.ReadCloser, param func(string)) erro
 	reader := bufio.NewReader(body)
 	y.updateStreamState(StreamStateReading, "Starting to read from stream")
 
-	lastTime := time.Now().Unix()
-	commentCount := 0
+	lastRefreshTime := time.Now()
+	refreshCount := 0
 	lineCount := 0
 
 	for {
@@ -95,20 +97,20 @@ func (y *Youtube) processStreamData(body io.ReadCloser, param func(string)) erro
 		y.log.Debug("Successfully read line %d in %v", lineCount, readTime)
 
 		if y.processStreamLine(line, readTime, param) {
-			y.log.Debug("Processing credential refresh check on line %d", lineCount)
-			shouldBreak, newLastTime, newCount := y.checkCredentialRefresh(lastTime, commentCount)
-			if shouldBreak {
-				y.log.Debug("Credential refresh check triggered break")
-				break
+			if time.Since(lastRefreshTime) > credRefreshInterval {
+				y.log.Debug("Refreshing credentials after %v of inactivity", time.Since(lastRefreshTime))
+				y.refreshCreds()
+				lastRefreshTime = time.Now()
+				refreshCount++
+
+				if refreshCount >= maxCredRefreshes {
+					y.log.Debug("Resetting SID after %d credential refreshes", refreshCount)
+					y.getSID()
+					refreshCount = 0
+				}
 			}
-			lastTime = newLastTime
-			commentCount = newCount
 		}
 	}
-
-	y.log.Debug("Stream data processing completed after %d lines", lineCount)
-
-	return nil
 }
 
 func (y *Youtube) processStreamLine(line string, readTime time.Duration, param func(string)) bool {
@@ -197,26 +199,6 @@ func (y *Youtube) handleConnectionError(err error) {
 	time.Sleep(reconnectDelay)
 }
 
-func (y *Youtube) checkCredentialRefresh(lastTime int64, commentCount int) (bool, int64, int) {
-	tempTime := time.Now()
-	diff := tempTime.Sub(time.Unix(lastTime, 0))
-
-	if diff > credRefreshInterval {
-		y.log.Debug("Refreshing credentials after %v of inactivity", diff)
-		y.refreshCreds()
-		lastTime = time.Now().Unix()
-		commentCount++
-	}
-
-	if commentCount >= maxCredRefreshes {
-		y.log.Debug("Resetting SID after %d credential refreshes", commentCount)
-		y.getSID()
-		return true, lastTime, 0
-	}
-
-	return false, lastTime, commentCount
-}
-
 func (y *Youtube) isValidResponse(response string) bool {
 	if len(response) < minResponseLength {
 		return false
@@ -250,23 +232,36 @@ func regexGetValue(re *regexp.Regexp, data string) (bool, []string) {
 }
 
 func (y *Youtube) getSID() {
-	url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=6167&CVER=22&zx=%s&t=1",
+	y.log.Debug("[Flow 3] getSID - Starting with gsessionid=%s, videoID=%s", y.gsessionID, y.videoID)
+	reqURL := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=6167&CVER=22&zx=%s&t=1",
 		y.gsessionID, y.config.API_KEY, utils.GenerateZX())
-	payloadRaw := fmt.Sprintf("count=1&ofs=0&req0___data__=[[[\"1\",[null,null,null,[9,5],null,[[\"youtube_live_chat_web\"],[1],[[[\"chat~%s\"]]]],null,null,1],null,3]]]", y.videoID)
-	payload := strings.NewReader(payloadRaw)
 
-	req, err := y.executeRequest(url, "POST", payload)
+	jsonData := fmt.Sprintf(`[[["1",[null,null,null,[9,5],null,[["youtube_live_chat_web"],[1],[[["chat~%s"]]]],null,null,1],null,3]]]`, y.videoID)
+	encodedData := fmt.Sprintf("count=1&ofs=0&req0___data__=%s", url.QueryEscape(jsonData))
+	y.log.Debug("[Flow 3] getSID payload: %s", encodedData)
+
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(encodedData))
 	if err != nil {
-		y.log.Error("getSID request error: %v", err)
+		y.log.Error("getSID: failed to create request: %v", err)
+		return
+	}
+
+	req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	req.Header.Set("x-webchannel-content-type", "application/json+protobuf")
+	y.copyHeaders(req)
+
+	resp, err := y.httpClient.Do(req)
+	if err != nil {
+		y.log.Error("getSID: HTTP request failed: %v", err)
 		return
 	}
 	defer func() {
-		if err := req.Body.Close(); err != nil {
+		if err := resp.Body.Close(); err != nil {
 			y.log.Error("Error closing response body: %v", err)
 		}
 	}()
 
-	limited := io.LimitReader(req.Body, 1<<20)
+	limited := io.LimitReader(resp.Body, 1<<20)
 	body, err := io.ReadAll(limited)
 	if err != nil {
 		y.log.Error("getSID read error: %v", err)
@@ -295,19 +290,22 @@ func (y *Youtube) extractSIDFromResponse(body []byte) {
 			if innerArray, ok := elem[1].([]interface{}); ok && len(innerArray) >= 2 {
 				if sid, ok := innerArray[1].(string); ok {
 					y.sid = sid
+					y.log.Debug("[Flow 3] getSID - Successfully extracted SID: %s", sid)
 					return
 				}
 			}
 		}
 	}
 
-	y.log.Error("getSID: SID not found in the JSON structure")
+	y.log.Error("[Flow 3] getSID: SID not found in the JSON structure")
 }
 
 func (y *Youtube) chooseServer() {
+	y.log.Debug("[Flow 2] chooseServer - Getting gsessionid for video: %s", y.videoID)
 	url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/v1/chooseServer?key=%s", y.config.API_KEY)
 
 	payloadStr := fmt.Sprintf(`[[null,null,null,[9,5],null,[["youtube_live_chat_web"],[1],[[["chat~%s"]]]]],null,null,0]`, y.videoID)
+	y.log.Debug("[Flow 2] chooseServer payload: %s", payloadStr)
 	payload := strings.NewReader(payloadStr)
 
 	req, err := http.NewRequest("POST", url, payload)
@@ -366,40 +364,47 @@ func (y *Youtube) chooseServer() {
 
 	var resultObj map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &resultObj); err == nil {
-		y.log.Debug("Response ChooseServer (object): %v", resultObj)
+		y.log.Debug("[Flow 2] Response ChooseServer (object): %v", resultObj)
 
 		if gsessionID, ok := resultObj["gsessionid"].(string); ok {
 			y.gsessionID = gsessionID
-			y.log.Debug("Extracted gsessionID from object: %s", gsessionID)
+			y.log.Debug("[Flow 2] Successfully extracted gsessionID from object: %s", gsessionID)
 			return
 		}
 	}
 
 	var resultArr []interface{}
 	if err := json.Unmarshal(bodyBytes, &resultArr); err != nil {
-		y.log.Error("chooseServer: decode error (tried both object and array): %v", err)
+		y.log.Error("[Flow 2] chooseServer: decode error (tried both object and array): %v", err)
 		return
 	}
 
-	y.log.Debug("Response ChooseServer (array): %v", resultArr)
+	y.log.Debug("[Flow 2] Response ChooseServer (array): %v", resultArr)
 
 	if len(resultArr) > 0 {
 		if gsessionID, ok := resultArr[0].(string); ok {
 			y.gsessionID = gsessionID
-			y.log.Debug("Extracted gsessionID from array: %s", gsessionID)
+			y.log.Debug("[Flow 2] Successfully extracted gsessionID from array: %s", gsessionID)
 		}
 	}
 }
 
 func (y *Youtube) refreshCreds() {
+	if y.session == "" {
+		y.log.Debug("[refreshCreds] Skipping: session not yet established")
+		return
+	}
+
+	y.log.Debug("[refreshCreds] Refreshing credentials with session=%s, gsessionid=%s", y.session, y.gsessionID)
 	url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/v1/refreshCreds?key=%s&gsessionid=%s",
 		y.config.API_KEY, y.gsessionID)
 	payloadRaw := fmt.Sprintf("[\"%s\"]", y.session)
+	y.log.Debug("[refreshCreds] Payload: %s", payloadRaw)
 	payload := strings.NewReader(payloadRaw)
 
 	resp, err := y.executeRequest(url, "POST", payload)
 	if err != nil {
-		y.log.Error("refresh creds error: %v", err)
+		y.log.Error("[refreshCreds] Error: %v", err)
 		return
 	}
 	defer func() {
@@ -408,5 +413,5 @@ func (y *Youtube) refreshCreds() {
 		}
 	}()
 
-	y.log.Debug("Refresh: %d\n", resp.StatusCode)
+	y.log.Debug("[refreshCreds] Success - Status: %d", resp.StatusCode)
 }

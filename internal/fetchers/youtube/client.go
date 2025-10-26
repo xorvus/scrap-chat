@@ -111,11 +111,25 @@ func (y *Youtube) createHTTPRequest(method, url string, bodyBytes []byte) (*http
 	y.copyHeaders(req)
 
 	if method == "POST" && len(bodyBytes) > 0 {
-		req.Header.Set("Content-Type", "application/json")
-		y.logVerbose("[CLIENT] Content-Type set to application/json")
+		contentType := y.getContentType(url)
+		req.Header.Set("Content-Type", contentType)
+		y.logVerbose("[CLIENT] Content-Type set to %s", contentType)
 	}
 
 	return req, nil
+}
+
+func (y *Youtube) getContentType(url string) string {
+	switch {
+	case strings.Contains(url, "/chooseServer"):
+		return "application/json+protobuf"
+	case strings.Contains(url, "/multi-watch/channel"):
+		return "application/x-www-form-urlencoded"
+	case strings.Contains(url, "/refreshCreds"):
+		return "application/json"
+	default:
+		return "application/json"
+	}
 }
 
 func (y *Youtube) fetchPage(url string) ([]byte, error) {
