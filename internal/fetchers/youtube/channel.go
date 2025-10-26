@@ -9,6 +9,9 @@ import (
 	"github.com/xorvus/scrap-chat/types"
 )
 
+// FetchChannelInfo retrieves basic information about a YouTube channel.
+// The path parameter can be a full YouTube URL or a channel handle (e.g., "@channelname").
+// Returns channel ID, name, description, image URL, and channel URL.
 func (y *Youtube) FetchChannelInfo(path string) (*types.ChannelInfo, error) {
 	y.logVerbose("[CHANNEL] Starting channel info fetch for path: %s", path)
 

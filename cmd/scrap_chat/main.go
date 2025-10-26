@@ -169,7 +169,6 @@ func handleInfo(chat *scrapchat.ScrapChat, config *Config) error {
 	return writeInfoOutput(formatted, config.Output, config.Format)
 }
 
-
 func writeInfoOutput(content, output, format string) error {
 	if output == outputFile {
 		ext := "txt"

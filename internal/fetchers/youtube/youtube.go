@@ -136,6 +136,8 @@ func (y *Youtube) resetStreamHealth() {
 	y.log.Debug("Health metrics reset")
 }
 
+// GetStreamHealth returns a copy of the current stream health metrics.
+// This includes statistics like bytes read, messages received, error counts, and timing information.
 func (y *Youtube) GetStreamHealth() *StreamHealth {
 	y.streamMutex.RLock()
 	defer y.streamMutex.RUnlock()
@@ -144,12 +146,16 @@ func (y *Youtube) GetStreamHealth() *StreamHealth {
 	return &health
 }
 
+// GetStreamState returns the current state of the stream connection.
+// Possible states: Disconnected, Connecting, Connected, Reading, Error, Recovering.
 func (y *Youtube) GetStreamState() StreamState {
 	y.streamMutex.RLock()
 	defer y.streamMutex.RUnlock()
 	return y.streamState
 }
 
+// LogStreamSummary logs a summary of the current stream health and state.
+// Includes uptime, message count, bytes transferred, error count, and average read time.
 func (y *Youtube) LogStreamSummary() {
 	health := y.GetStreamHealth()
 	state := y.GetStreamState()

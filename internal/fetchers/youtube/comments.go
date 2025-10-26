@@ -15,6 +15,11 @@ import (
 	"github.com/xorvus/scrap-chat/types"
 )
 
+// FetchVideoComments retrieves all comments from a YouTube video.
+// The videoID parameter can be a full YouTube video URL or just the video ID.
+// If date is provided, only comments posted after that date are returned.
+// Returns a channel that emits comments sequentially, including replies.
+// The returned channel is closed when all comments have been fetched or an error occurs.
 func (y *Youtube) FetchVideoComments(videoID string, date *time.Time) (<-chan *types.ChatMessage, error) {
 	y.logCommentsFetchInfo(videoID, date)
 
@@ -32,7 +37,7 @@ func (y *Youtube) FetchVideoComments(videoID string, date *time.Time) (<-chan *t
 
 	y.logVerbose("[COMMENTS] Successfully extracted video ID: %s", y.videoID)
 
-	commentsChan := make(chan *types.ChatMessage, 100)
+	commentsChan := make(chan *types.ChatMessage, defaultChannelBuffer)
 	go y.startCommentsFetch(commentsChan, date)
 
 	y.logVerbose("[COMMENTS] Successfully created comments channel")
@@ -349,7 +354,7 @@ func (y *Youtube) parseCommentItem(data []byte) *types.ChatMessage {
 			ID:         authorID,
 			Name:       authorName,
 			Thumbnail:  authorThumbnail,
-			URL:        fmt.Sprintf("https://youtube.com/channel/%s", authorID),
+			URL:        fmt.Sprintf(youtubeChannelURL, authorID),
 			IsUploader: isFavorited,
 			IsVerified: isVerified,
 			Badges:     badges,
@@ -421,9 +426,20 @@ func (y *Youtube) extractReplies(data []byte) ([]types.ChatMessage, error) {
 	return replies, nil
 }
 
+// timeUnitMultipliers maps time unit prefixes to their duration in hours
+var timeUnitMultipliers = map[string]time.Duration{
+	"second": time.Second,
+	"minute": time.Minute,
+	"hour":   time.Hour,
+	"day":    24 * time.Hour,
+	"week":   7 * 24 * time.Hour,
+	"month":  30 * 24 * time.Hour,
+	"year":   365 * 24 * time.Hour,
+}
+
+// parseRelativeTime converts a relative time string (e.g., "2 hours ago") to Unix timestamp
 func parseRelativeTime(timeStr string) int64 {
 	now := time.Now()
-
 	timeStr = strings.ToLower(strings.TrimSpace(timeStr))
 
 	if timeStr == "" || timeStr == "just now" {
@@ -440,29 +456,22 @@ func parseRelativeTime(timeStr string) int64 {
 		return now.Unix()
 	}
 
-	unit := parts[1]
-
-	var duration time.Duration
-	switch {
-	case strings.HasPrefix(unit, "second"):
-		duration = time.Duration(value) * time.Second
-	case strings.HasPrefix(unit, "minute"):
-		duration = time.Duration(value) * time.Minute
-	case strings.HasPrefix(unit, "hour"):
-		duration = time.Duration(value) * time.Hour
-	case strings.HasPrefix(unit, "day"):
-		duration = time.Duration(value) * 24 * time.Hour
-	case strings.HasPrefix(unit, "week"):
-		duration = time.Duration(value) * 7 * 24 * time.Hour
-	case strings.HasPrefix(unit, "month"):
-		duration = time.Duration(value) * 30 * 24 * time.Hour
-	case strings.HasPrefix(unit, "year"):
-		duration = time.Duration(value) * 365 * 24 * time.Hour
-	default:
+	duration := findTimeUnitDuration(parts[1])
+	if duration == 0 {
 		return now.Unix()
 	}
 
-	return now.Add(-duration).Unix()
+	return now.Add(-time.Duration(value) * duration).Unix()
+}
+
+// findTimeUnitDuration returns the duration for a given time unit string
+func findTimeUnitDuration(unit string) time.Duration {
+	for prefix, duration := range timeUnitMultipliers {
+		if strings.HasPrefix(unit, prefix) {
+			return duration
+		}
+	}
+	return 0
 }
 
 func parseCount(countStr string) int {

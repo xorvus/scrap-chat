@@ -172,7 +172,7 @@ func (y *Youtube) resolveContinuationFallback(ytcfgCont, reloadCont string) stri
 }
 
 func (y *Youtube) fetchLiveChatContinuation(reloadContinuation string) (string, error) {
-	url := fmt.Sprintf("https://www.youtube.com/live_chat?continuation=%s", reloadContinuation)
+	url := fmt.Sprintf(liveChatPageURL, reloadContinuation)
 
 	y.log.Debug("Fetching live_chat page from: %s", url)
 

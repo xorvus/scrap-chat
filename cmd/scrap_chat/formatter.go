@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -14,25 +13,25 @@ import (
 
 const timeFormat = "2006/01/02 15:04:05"
 
-func formatLiveChatMessage(msg *types.LiveChatMessage, format, customOutput string) string {
+func formatLiveChatMessage(msg *types.LiveChatMessage, format, customOutput string) (string, error) {
 	switch format {
 	case formatJSON:
 		return marshalJSON(msg)
 	case formatCustom:
 		return formatCustomLiveChat(msg, customOutput)
 	default:
-		return formatDefaultLiveChat(msg)
+		return formatDefaultLiveChat(msg), nil
 	}
 }
 
-func formatVideoChatMessage(msg *types.ChatMessage, format, customOutput string) string {
+func formatVideoChatMessage(msg *types.ChatMessage, format, customOutput string) (string, error) {
 	switch format {
 	case formatJSON:
 		return marshalJSON(msg)
 	case formatCustom:
 		return formatCustomVideoChat(msg, customOutput)
 	default:
-		return formatDefaultVideoChat(msg)
+		return formatDefaultVideoChat(msg), nil
 	}
 }
 
@@ -54,12 +53,12 @@ func formatChannelInfo(info *types.ChannelInfo, format, customOutput string) (st
 	}
 }
 
-func marshalJSON(v interface{}) string {
+func marshalJSON(v interface{}) (string, error) {
 	data, err := json.MarshalIndent(v, "  ", "  ")
 	if err != nil {
-		log.Fatalf("Failed to marshal JSON: %v", err)
+		return "", fmt.Errorf("failed to marshal JSON: %w", err)
 	}
-	return string(data)
+	return string(data), nil
 }
 
 func formatDefaultLiveChat(msg *types.LiveChatMessage) string {
@@ -77,18 +76,18 @@ func formatDefaultVideoChat(msg *types.ChatMessage) string {
 		timestamp, msg.Author.Name, replyStr, msg.Message, msg.LikeCount, msg.ReplyCount)
 }
 
-func formatCustomLiveChat(msg *types.LiveChatMessage, customOutput string) string {
+func formatCustomLiveChat(msg *types.LiveChatMessage, customOutput string) (string, error) {
 	if strings.TrimSpace(customOutput) == "" {
-		log.Fatal("Custom format requires custom-output template")
+		return "", fmt.Errorf("custom format requires custom-output template")
 	}
-	return applyLiveCustomTemplate(customOutput, msg)
+	return applyLiveCustomTemplate(customOutput, msg), nil
 }
 
-func formatCustomVideoChat(msg *types.ChatMessage, customOutput string) string {
+func formatCustomVideoChat(msg *types.ChatMessage, customOutput string) (string, error) {
 	if strings.TrimSpace(customOutput) == "" {
-		log.Fatal("Custom format requires custom-output template")
+		return "", fmt.Errorf("custom format requires custom-output template")
 	}
-	return applyVideoCustomTemplate(customOutput, msg)
+	return applyVideoCustomTemplate(customOutput, msg), nil
 }
 
 func applyInfoCustomTemplate(template string, info *types.ChannelInfo) string {

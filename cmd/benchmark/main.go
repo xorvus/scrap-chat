@@ -243,4 +243,3 @@ func getMemStats() memStat {
 		NumGC:   m.NumGC,
 	}
 }
-

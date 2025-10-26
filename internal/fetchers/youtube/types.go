@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	// Regular expressions for parsing YouTube responses
 	regexFirstChat   = `\[\[\d+,\[\[null,null,\["([^"]+)"\]\]\]\]`
 	regexNoChat      = `\[\[\d*,\[\[\[\[.*\[null,null,\["\d*`
 	regexChat        = `\d{16,}`
@@ -15,31 +16,49 @@ const (
 	regexYTCfg       = `ytcfg\.set\((\{.*?})\);`
 	regexInitialData = `(?s)(?:window\s*\[\s*["']ytInitialData["']\s*\]|ytInitialData)\s*=\s*({.+?})\s*;`
 
-	youtubeBaseURL   = "https://www.youtube.com"
-	youtubeAPIURL    = "https://www.youtube.com/youtubei/v1"
-	liveChatEndpoint = youtubeAPIURL + "/live_chat/get_live_chat?prettyPrint=false"
-	nextEndpoint     = youtubeAPIURL + "/next?prettyPrint=false"
+	// YouTube API endpoints
+	youtubeBaseURL       = "https://www.youtube.com"
+	youtubeAPIURL        = "https://www.youtube.com/youtubei/v1"
+	youtubeSignalerURL   = "https://signaler-pa.youtube.com"
+	youtubeChannelURL    = "https://youtube.com/channel/%s"
+	liveChatEndpoint     = youtubeAPIURL + "/live_chat/get_live_chat?prettyPrint=false"
+	nextEndpoint         = youtubeAPIURL + "/next?prettyPrint=false"
+	liveChatPageURL      = youtubeBaseURL + "/live_chat?continuation=%s"
+	chooseServerURL      = youtubeSignalerURL + "/punctual/v1/chooseServer?key=%s"
+	refreshCredsURL      = youtubeSignalerURL + "/punctual/v1/refreshCreds?key=%s&gsessionid=%s"
+	multiWatchChannelFmt = youtubeSignalerURL + "/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=rpc&SID=%s&AID=0&CI=0&TYPE=xmlhttp&zx=%s&t=1"
+	getSIDURL            = youtubeSignalerURL + "/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=6167&CVER=22&zx=%s&t=1"
 
+	// User agent strings
+	defaultUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+	signalerUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
+	// HTTP configuration
 	maxResponseHeaderBytes = 1 << 20
 	maxResponseBodyBytes   = 2 << 20
 	bufferInitialSize      = 32 * 1024
 
+	// Timing configuration
 	defaultHTTPTimeout  = 300 * time.Second
 	reconnectDelay      = 500 * time.Millisecond
 	credRefreshInterval = 4 * time.Minute
 	maxCredRefreshes    = 4
 
+	// Retry configuration
 	maxRetries     = 3
 	baseRetryDelay = 1 * time.Second
 	maxRetryDelay  = 16 * time.Second
 
+	// Stream configuration
 	minResponseLength    = 10
 	streamReadTimeout    = 120 * time.Second
 	maxConsecutiveErrors = 5
 
-	initialMsgCapacity  = 128
-	messageCleanupAfter = 30 * time.Minute
-	cleanupInterval     = 10 * time.Minute
+	// Message handling
+	initialMsgCapacity   = 128
+	messageCleanupAfter  = 30 * time.Minute
+	cleanupInterval      = 10 * time.Minute
+	defaultChannelBuffer = 100 // Default buffer size for message channels
 )
 
 var (

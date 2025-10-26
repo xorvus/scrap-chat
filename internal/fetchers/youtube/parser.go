@@ -169,4 +169,3 @@ func (y *Youtube) finalizeMessageText(textBuilder *strings.Builder) {
 		textBuilder.WriteString(finalText)
 	}
 }
-

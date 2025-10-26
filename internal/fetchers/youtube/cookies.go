@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// AddCookies loads authentication cookies from a Netscape format cookie file.
+// This allows access to members-only or restricted YouTube live streams.
+// The cookies are automatically included in all subsequent HTTP requests.
 func (y *Youtube) AddCookies(path string) error {
 	y.logVerbose("[COOKIES] Starting to add cookies from file: %s", path)
 

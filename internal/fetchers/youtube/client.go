@@ -144,19 +144,8 @@ func (y *Youtube) fetchPage(url string) ([]byte, error) {
 		return nil, err
 	}
 
-	req.Header.Add("Upgrade-Insecure-Requests", "1")
-	req.Header.Add("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
-	req.Header.Add("sec-ch-ua", `"Brave";v="141", "Not?A_Brand";v="8", "Chromium";v="141"`)
-	req.Header.Add("sec-ch-ua-arch", `"arm"`)
-	req.Header.Add("sec-ch-ua-bitness", `"64"`)
-	req.Header.Add("sec-ch-ua-full-version-list", `"Brave";v="141.0.0.0", "Not?A_Brand";v="8.0.0.0", "Chromium";v="141.0.0.0"`)
-	req.Header.Add("sec-ch-ua-mobile", "?0")
-	req.Header.Add("sec-ch-ua-model", `""`)
-	req.Header.Add("sec-ch-ua-platform", `"macOS"`)
-	req.Header.Add("sec-ch-ua-platform-version", `"15.6.1"`)
-	req.Header.Add("sec-ch-ua-wow64", "?0")
-	req.Header.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-	req.Header.Add("Accept-Language", "en-US,en;q=0.9")
+	// Apply common browser headers
+	y.setPageFetchHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -224,6 +213,9 @@ func shouldRetryConnection(err error) bool {
 	return false
 }
 
+// SavePageHTML fetches a YouTube page and saves its HTML content to a file.
+// This is useful for debugging and analyzing page structure.
+// The HTML is saved exactly as received from the server.
 func (y *Youtube) SavePageHTML(url, outputPath string) error {
 	y.log.Debug("Saving HTML from URL: %s to: %s", url, outputPath)
 

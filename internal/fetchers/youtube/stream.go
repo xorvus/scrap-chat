@@ -72,8 +72,7 @@ func (y *Youtube) establishConnection(param func(string)) error {
 
 func (y *Youtube) buildSignalerURL() string {
 	y.log.Debug("[Flow 4] Building long polling URL - gsessionid=%s, SID=%s", y.gsessionID, y.sid)
-	return fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=rpc&SID=%s&AID=0&CI=0&TYPE=xmlhttp&zx=%s&t=1",
-		y.gsessionID, y.config.API_KEY, y.sid, utils.GenerateZX())
+	return fmt.Sprintf(multiWatchChannelFmt, y.gsessionID, y.config.API_KEY, y.sid, utils.GenerateZX())
 }
 
 func (y *Youtube) processStreamData(body io.ReadCloser, param func(string)) error {
@@ -233,8 +232,7 @@ func regexGetValue(re *regexp.Regexp, data string) (bool, []string) {
 
 func (y *Youtube) getSID() {
 	y.log.Debug("[Flow 3] getSID - Starting with gsessionid=%s, videoID=%s", y.gsessionID, y.videoID)
-	reqURL := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/multi-watch/channel?VER=8&gsessionid=%s&key=%s&RID=6167&CVER=22&zx=%s&t=1",
-		y.gsessionID, y.config.API_KEY, utils.GenerateZX())
+	reqURL := fmt.Sprintf(getSIDURL, y.gsessionID, y.config.API_KEY, utils.GenerateZX())
 
 	jsonData := fmt.Sprintf(`[[["1",[null,null,null,[9,5],null,[["youtube_live_chat_web"],[1],[[["chat~%s"]]]],null,null,1],null,3]]]`, y.videoID)
 	encodedData := fmt.Sprintf("count=1&ofs=0&req0___data__=%s", url.QueryEscape(jsonData))
@@ -300,9 +298,10 @@ func (y *Youtube) extractSIDFromResponse(body []byte) {
 	y.log.Error("[Flow 3] getSID: SID not found in the JSON structure")
 }
 
+// chooseServer obtains a gsessionID from YouTube's signaler service for live chat streaming
 func (y *Youtube) chooseServer() {
 	y.log.Debug("[Flow 2] chooseServer - Getting gsessionid for video: %s", y.videoID)
-	url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/v1/chooseServer?key=%s", y.config.API_KEY)
+	url := fmt.Sprintf(chooseServerURL, y.config.API_KEY)
 
 	payloadStr := fmt.Sprintf(`[[null,null,null,[9,5],null,[["youtube_live_chat_web"],[1],[[["chat~%s"]]]]],null,null,0]`, y.videoID)
 	y.log.Debug("[Flow 2] chooseServer payload: %s", payloadStr)
@@ -314,28 +313,7 @@ func (y *Youtube) chooseServer() {
 		return
 	}
 
-	req.Header.Set("accept", "*/*")
-	req.Header.Set("accept-language", "en-US,en;q=0.6")
-	req.Header.Set("cache-control", "no-cache")
-	req.Header.Set("content-type", "application/json+protobuf")
-	req.Header.Set("origin", "https://www.youtube.com")
-	req.Header.Set("pragma", "no-cache")
-	req.Header.Set("priority", "u=1, i")
-	req.Header.Set("referer", "https://www.youtube.com/")
-	req.Header.Set("sec-ch-ua", `"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"`)
-	req.Header.Set("sec-ch-ua-arch", `"arm"`)
-	req.Header.Set("sec-ch-ua-bitness", `"64"`)
-	req.Header.Set("sec-ch-ua-full-version-list", `"Google Chrome";v="141.0.0.0", "Not?A_Brand";v="8.0.0.0", "Chromium";v="141.0.0.0"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-model", `""`)
-	req.Header.Set("sec-ch-ua-platform", `"macOS"`)
-	req.Header.Set("sec-ch-ua-platform-version", `"15.6.1"`)
-	req.Header.Set("sec-ch-ua-wow64", "?0")
-	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("sec-fetch-site", "same-site")
-	req.Header.Set("sec-gpc", "1")
-	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+	req.Header = buildSignalerHeaders()
 
 	resp, err := y.httpClient.Do(req)
 	if err != nil {
@@ -362,6 +340,11 @@ func (y *Youtube) chooseServer() {
 		return
 	}
 
+	y.extractGSessionID(bodyBytes)
+}
+
+// extractGSessionID parses the chooseServer response and extracts the gsessionID
+func (y *Youtube) extractGSessionID(bodyBytes []byte) {
 	var resultObj map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &resultObj); err == nil {
 		y.log.Debug("[Flow 2] Response ChooseServer (object): %v", resultObj)
@@ -396,8 +379,7 @@ func (y *Youtube) refreshCreds() {
 	}
 
 	y.log.Debug("[refreshCreds] Refreshing credentials with session=%s, gsessionid=%s", y.session, y.gsessionID)
-	url := fmt.Sprintf("https://signaler-pa.youtube.com/punctual/v1/refreshCreds?key=%s&gsessionid=%s",
-		y.config.API_KEY, y.gsessionID)
+	url := fmt.Sprintf(refreshCredsURL, y.config.API_KEY, y.gsessionID)
 	payloadRaw := fmt.Sprintf("[\"%s\"]", y.session)
 	y.log.Debug("[refreshCreds] Payload: %s", payloadRaw)
 	payload := strings.NewReader(payloadRaw)

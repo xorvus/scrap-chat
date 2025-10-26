@@ -11,6 +11,10 @@ import (
 	"github.com/xorvus/scrap-chat/types"
 )
 
+// FetchLiveChat initiates a live chat stream from an active YouTube live stream.
+// The path parameter can be a YouTube live stream URL or a channel handle (e.g., "@channelname/live").
+// Returns a channel that emits live chat messages in real-time until the stream ends.
+// The returned channel is closed when the stream ends or an error occurs.
 func (y *Youtube) FetchLiveChat(path string) (<-chan *types.LiveChatMessage, error) {
 	y.logVerbose("[LIVECHAT] Starting live chat fetch for: %s", path)
 
@@ -29,7 +33,7 @@ func (y *Youtube) FetchLiveChat(path string) (<-chan *types.LiveChatMessage, err
 
 	y.setupInvalidationDataIfNeeded()
 
-	msg := make(chan *types.LiveChatMessage)
+	msg := make(chan *types.LiveChatMessage, defaultChannelBuffer)
 	go y.processLiveChatMessages(msg)
 
 	y.logVerbose("[LIVECHAT] Successfully created and returned live chat message channel")
@@ -131,7 +135,7 @@ func (y *Youtube) convertToLiveChatMessage(param types.YTChatMessage) *types.Liv
 			ID:        param.Author.AuthorID,
 			Name:      param.Author.AuthorName,
 			Thumbnail: userImage,
-			URL:       fmt.Sprintf("https://youtube.com/channel/%s", param.Author.AuthorID),
+			URL:       fmt.Sprintf(youtubeChannelURL, param.Author.AuthorID),
 			Badges:    badges,
 			Ranking:   param.Author.Ranking,
 		},

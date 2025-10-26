@@ -120,7 +120,7 @@ func (h *JSONFileHandler) close() {
 }
 
 type MessageFormatter interface {
-	Format(format, customOutput string) string
+	Format(format, customOutput string) (string, error)
 	PrintConsole()
 }
 
@@ -128,7 +128,7 @@ type LiveChatFormatter struct {
 	msg *types.LiveChatMessage
 }
 
-func (f *LiveChatFormatter) Format(format, customOutput string) string {
+func (f *LiveChatFormatter) Format(format, customOutput string) (string, error) {
 	return formatLiveChatMessage(f.msg, format, customOutput)
 }
 
@@ -141,7 +141,7 @@ type VideoCommentFormatter struct {
 	msg *types.ChatMessage
 }
 
-func (f *VideoCommentFormatter) Format(format, customOutput string) string {
+func (f *VideoCommentFormatter) Format(format, customOutput string) (string, error) {
 	return formatVideoChatMessage(f.msg, format, customOutput)
 }
 
@@ -186,7 +186,10 @@ func (h *GenericOutputHandler) initialize() error {
 }
 
 func (h *GenericOutputHandler) writeMessage(formatter MessageFormatter, customOutput string) error {
-	line := formatter.Format(h.format, customOutput)
+	line, err := formatter.Format(h.format, customOutput)
+	if err != nil {
+		return fmt.Errorf("failed to format message: %w", err)
+	}
 
 	if h.isFile && h.isJSON {
 		if err := h.jsonHandler.writeJSONLine(line); err != nil {
