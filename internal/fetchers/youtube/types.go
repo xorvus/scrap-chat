@@ -63,9 +63,9 @@ const (
 	defaultChannelBuffer = 100             // Buffered channel for high-traffic streams (prevents message drops)
 
 	// Comment fetching configuration
-	maxCommentIterations = 100                    // Safety limit to prevent infinite loop (dynamic until no continuation)
-	maxReplyIterations   = 20                     // Safety limit for reply fetching per parent comment
-	commentAPIDelay      = 200 * time.Millisecond // Delay between comment API calls
+	maxCommentIterations = 1000                   // Safety limit to prevent infinite loop (dynamic until no continuation)
+	maxReplyIterations   = 100                    // Safety limit for reply fetching per parent comment
+	commentAPIDelay      = 100 * time.Millisecond // Delay between comment API calls
 	replyAPIDelay        = 200 * time.Millisecond // Delay between reply API calls
 )
 

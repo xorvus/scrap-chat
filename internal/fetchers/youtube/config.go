@@ -165,8 +165,14 @@ func tryStandardPaths(data []byte) string {
 				arr := items.Array()
 				if len(arr) > 0 {
 					lastItem := arr[len(arr)-1]
-					token := lastItem.Get("continuationItemRenderer.continuationEndpoint.continuationCommand.token").String()
-					if token != "" && token != "undefined" {
+					// Try button path first (for "Show more replies")
+					token := lastItem.Get("continuationItemRenderer.button.buttonRenderer.command.continuationCommand.token").String()
+					if isValidToken(token) {
+						return token
+					}
+					// Fallback to direct endpoint path
+					token = lastItem.Get("continuationItemRenderer.continuationEndpoint.continuationCommand.token").String()
+					if isValidToken(token) {
 						return token
 					}
 				}
@@ -178,8 +184,14 @@ func tryStandardPaths(data []byte) string {
 				arr := items.Array()
 				if len(arr) > 0 {
 					lastItem := arr[len(arr)-1]
-					token := lastItem.Get("continuationItemRenderer.continuationEndpoint.continuationCommand.token").String()
-					if token != "" && token != "undefined" {
+					// Try button path first (for "Show more replies")
+					token := lastItem.Get("continuationItemRenderer.button.buttonRenderer.command.continuationCommand.token").String()
+					if isValidToken(token) {
+						return token
+					}
+					// Fallback to direct endpoint path
+					token = lastItem.Get("continuationItemRenderer.continuationEndpoint.continuationCommand.token").String()
+					if isValidToken(token) {
 						return token
 					}
 				}
@@ -195,8 +207,11 @@ func tryStandardPaths(data []byte) string {
 
 	for _, path := range altPaths {
 		result := gjson.GetBytes(data, path)
-		if result.Exists() && result.String() != "" && result.String() != "undefined" {
-			return result.String()
+		if result.Exists() {
+			token := result.String()
+			if isValidToken(token) {
+				return token
+			}
 		}
 	}
 
@@ -213,12 +228,16 @@ func tryAlternativePaths(data []byte) string {
 		results := gjson.GetBytes(data, path)
 		if results.IsArray() {
 			for _, result := range results.Array() {
-				if result.String() != "" && result.String() != "undefined" {
-					return result.String()
+				token := result.String()
+				if isValidToken(token) {
+					return token
 				}
 			}
-		} else if results.Exists() && results.String() != "" && results.String() != "undefined" {
-			return results.String()
+		} else if results.Exists() {
+			token := results.String()
+			if isValidToken(token) {
+				return token
+			}
 		}
 	}
 	return ""
@@ -233,7 +252,9 @@ func tryAdditionalPaths(data []byte) string {
 		// Reply continuation paths
 		"continuationContents.commentRepliesContinuation.continuations.0.nextContinuationData.continuation",
 		"continuationContents.commentRepliesContinuation.continuations.#.nextContinuationData.continuation",
-		// Direct continuation item
+		// Direct continuation item with button (for "Show more replies")
+		"continuationItemRenderer.button.buttonRenderer.command.continuationCommand.token",
+		// Direct continuation item with endpoint
 		"continuationItemRenderer.continuationEndpoint.continuationCommand.token",
 		// Try to find any continuation in the response
 		"continuation",
@@ -241,11 +262,40 @@ func tryAdditionalPaths(data []byte) string {
 
 	for _, path := range morePaths {
 		result := gjson.GetBytes(data, path)
-		if result.Exists() && result.String() != "" && result.String() != "undefined" {
-			return result.String()
+		if result.Exists() {
+			token := result.String()
+			if isValidToken(token) {
+				return token
+			}
 		}
 	}
 	return ""
+}
+
+// isValidToken validates continuation token
+func isValidToken(token string) bool {
+	// Empty tokens are invalid
+	if token == "" {
+		return false
+	}
+
+	// "undefined" is invalid
+	if token == "undefined" {
+		return false
+	}
+
+	// JSON arrays/objects like "[]", "{}", etc are invalid tokens
+	if (strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]")) ||
+		(strings.HasPrefix(token, "{") && strings.HasSuffix(token, "}")) {
+		return false
+	}
+
+	// Token should have reasonable minimum length (YouTube tokens are typically long)
+	if len(token) < 10 {
+		return false
+	}
+
+	return true
 }
 
 func (y *Youtube) resolveContinuationFallback(ytcfgCont, reloadCont string) string {
