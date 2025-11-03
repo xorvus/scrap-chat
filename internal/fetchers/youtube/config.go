@@ -135,17 +135,117 @@ func extractVideoID(jsonBytes []byte) string {
 }
 
 func extractContinuationFromComments(data []byte) (string, error) {
-	paths := []string{
-		"onResponseReceivedEndpoints.0.reloadContinuationItemsCommand.continuationItems.-1.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
-		"onResponseReceivedEndpoints.1.appendContinuationItemsAction.continuationItems.-1.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
-		"continuationContents.itemSectionContinuation.continuations.0.nextContinuationData.continuation",
+	// Try standard continuation paths
+	if token := tryStandardPaths(data); token != "" {
+		return token, nil
 	}
 
-	result := extractJSONPath(data, paths)
-	if result == "" {
-		return "", ErrNoContinuation
+	// Try alternative continuation paths
+	if token := tryAlternativePaths(data); token != "" {
+		return token, nil
 	}
-	return result, nil
+
+	// Try additional continuation paths
+	if token := tryAdditionalPaths(data); token != "" {
+		return token, nil
+	}
+
+	return "", ErrNoContinuation
+}
+
+func tryStandardPaths(data []byte) string {
+	// Iterate through all endpoints manually (most reliable approach)
+	// gjson doesn't support negative index -1 in path notation, so we must get array and access last item
+	endpoints := gjson.GetBytes(data, "onResponseReceivedEndpoints")
+	if endpoints.Exists() && endpoints.IsArray() {
+		for _, endpoint := range endpoints.Array() {
+			// Try reloadContinuationItemsCommand
+			items := endpoint.Get("reloadContinuationItemsCommand.continuationItems")
+			if items.Exists() && items.IsArray() {
+				arr := items.Array()
+				if len(arr) > 0 {
+					lastItem := arr[len(arr)-1]
+					token := lastItem.Get("continuationItemRenderer.continuationEndpoint.continuationCommand.token").String()
+					if token != "" && token != "undefined" {
+						return token
+					}
+				}
+			}
+
+			// Try appendContinuationItemsAction
+			items = endpoint.Get("appendContinuationItemsAction.continuationItems")
+			if items.Exists() && items.IsArray() {
+				arr := items.Array()
+				if len(arr) > 0 {
+					lastItem := arr[len(arr)-1]
+					token := lastItem.Get("continuationItemRenderer.continuationEndpoint.continuationCommand.token").String()
+					if token != "" && token != "undefined" {
+						return token
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to alternative patterns
+	altPaths := []string{
+		"continuationContents.itemSectionContinuation.continuations.0.nextContinuationData.continuation",
+		"continuationContents.itemSectionContinuation.continuations.0.continuationEndpoint.continuationCommand.token",
+	}
+
+	for _, path := range altPaths {
+		result := gjson.GetBytes(data, path)
+		if result.Exists() && result.String() != "" && result.String() != "undefined" {
+			return result.String()
+		}
+	}
+
+	return ""
+}
+
+func tryAlternativePaths(data []byte) string {
+	altPaths := []string{
+		"onResponseReceivedEndpoints.#.reloadContinuationItemsCommand.continuationItems.#.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
+		"onResponseReceivedEndpoints.#.appendContinuationItemsAction.continuationItems.#.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
+	}
+
+	for _, path := range altPaths {
+		results := gjson.GetBytes(data, path)
+		if results.IsArray() {
+			for _, result := range results.Array() {
+				if result.String() != "" && result.String() != "undefined" {
+					return result.String()
+				}
+			}
+		} else if results.Exists() && results.String() != "" && results.String() != "undefined" {
+			return results.String()
+		}
+	}
+	return ""
+}
+
+func tryAdditionalPaths(data []byte) string {
+	morePaths := []string{
+		"continuationContents.nextContinuationData.continuation",
+		"continuationContents.continuationEndpoint.continuationCommand.token",
+		"onResponseReceivedEndpoints.#.continuationContents.nextContinuationData.continuation",
+		"onResponseReceivedEndpoints.#.continuationContents.continuationEndpoint.continuationCommand.token",
+		// Reply continuation paths
+		"continuationContents.commentRepliesContinuation.continuations.0.nextContinuationData.continuation",
+		"continuationContents.commentRepliesContinuation.continuations.#.nextContinuationData.continuation",
+		// Direct continuation item
+		"continuationItemRenderer.continuationEndpoint.continuationCommand.token",
+		// Try to find any continuation in the response
+		"continuation",
+	}
+
+	for _, path := range morePaths {
+		result := gjson.GetBytes(data, path)
+		if result.Exists() && result.String() != "" && result.String() != "undefined" {
+			return result.String()
+		}
+	}
+	return ""
 }
 
 func (y *Youtube) resolveContinuationFallback(ytcfgCont, reloadCont string) string {

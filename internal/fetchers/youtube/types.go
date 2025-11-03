@@ -61,6 +61,12 @@ const (
 	cleanupInterval      = 5 * time.Minute // Cleanup more frequently for smaller batches and less lag
 	maxSeenMessageIDs    = 10000           // Maximum size of seenMessageIDs map to prevent unbounded growth
 	defaultChannelBuffer = 100             // Buffered channel for high-traffic streams (prevents message drops)
+
+	// Comment fetching configuration
+	maxCommentIterations = 100                    // Safety limit to prevent infinite loop (dynamic until no continuation)
+	maxReplyIterations   = 20                     // Safety limit for reply fetching per parent comment
+	commentAPIDelay      = 200 * time.Millisecond // Delay between comment API calls
+	replyAPIDelay        = 200 * time.Millisecond // Delay between reply API calls
 )
 
 var (

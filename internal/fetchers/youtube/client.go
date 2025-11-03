@@ -2,6 +2,8 @@ package youtube
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,6 +60,9 @@ func (y *Youtube) executeWithRetry(url, method string, body io.Reader) (*http.Re
 }
 
 func (y *Youtube) executeRequest(url, method string, body io.Reader) (*http.Response, error) {
+	// Add rate limiting to avoid being blocked
+	y.applyRateLimit()
+
 	y.logVerbose("[CLIENT] Preparing %s request to: %s", method, url)
 
 	bodyBytes, err := y.readRequestBody(body)
@@ -80,6 +85,43 @@ func (y *Youtube) executeRequest(url, method string, body io.Reader) (*http.Resp
 	}
 
 	y.logVerbose("[CLIENT] Request executed successfully, received response")
+	return resp, nil
+}
+
+// executeRequestWithContext executes HTTP request with context support for timeout
+func (y *Youtube) executeRequestWithContext(ctx context.Context, url, method string, body io.Reader) (*http.Response, error) {
+	// Add rate limiting to avoid being blocked
+	y.applyRateLimit()
+
+	y.logVerbose("[CLIENT] Preparing %s request to: %s with context timeout", method, url)
+
+	bodyBytes, err := y.readRequestBody(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := y.createHTTPRequest(method, url, bodyBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set context with timeout
+	req = req.WithContext(ctx)
+
+	y.logVerbose("[CLIENT] Executing HTTP request with timeout")
+
+	resp, err := y.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			y.logVerbose("[CLIENT] Request timeout exceeded")
+			return nil, fmt.Errorf("request timeout exceeded: %w", err)
+		}
+		err := fmt.Errorf("failed to execute request: %w", err)
+		y.logVerbose("[CLIENT] Request execution failed: %v", err)
+		return nil, err
+	}
+
+	y.logVerbose("[CLIENT] Request completed successfully")
 	return resp, nil
 }
 
@@ -190,6 +232,21 @@ func calculateBackoff(attempt int) time.Duration {
 		return maxRetryDelay
 	}
 	return delay
+}
+
+func (y *Youtube) applyRateLimit() {
+	y.requestMutex.Lock()
+	defer y.requestMutex.Unlock()
+
+	minDelay := 2 * time.Second // Increased to 2 seconds to avoid rate limiting
+	elapsed := time.Since(y.lastRequestTime)
+
+	if elapsed < minDelay {
+		sleepTime := minDelay - elapsed
+		time.Sleep(sleepTime)
+	}
+
+	y.lastRequestTime = time.Now()
 }
 
 func shouldRetryConnection(err error) bool {

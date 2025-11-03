@@ -2,10 +2,12 @@ package youtube
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,13 +17,11 @@ import (
 	"github.com/xorvus/scrap-chat/types"
 )
 
-// FetchVideoComments retrieves all comments from a YouTube video.
-// The videoID parameter can be a full YouTube video URL or just the video ID.
-// If date is provided, only comments posted after that date are returned.
-// Returns a channel that emits comments sequentially, including replies.
-// The returned channel is closed when all comments have been fetched or an error occurs.
 func (y *Youtube) FetchVideoComments(videoID string, date *time.Time) (<-chan *types.ChatMessage, error) {
-	y.logCommentsFetchInfo(videoID, date)
+	y.log.Debug("Starting comment fetch for video: %s", videoID)
+	if date != nil {
+		y.log.Debug("Filtering comments after date: %v", date)
+	}
 
 	normalizedVideoID := y.normalizeVideoID(videoID)
 
@@ -30,121 +30,143 @@ func (y *Youtube) FetchVideoComments(videoID string, date *time.Time) (<-chan *t
 	}
 
 	if y.videoID == "" {
-		err := fmt.Errorf("failed to extract video ID")
-		y.logVerbose("[COMMENTS] %v", err)
-		return nil, err
+		return nil, fmt.Errorf("failed to extract video ID")
 	}
-
-	y.logVerbose("[COMMENTS] Successfully extracted video ID: %s", y.videoID)
 
 	commentsChan := make(chan *types.ChatMessage, defaultChannelBuffer)
 	go y.startCommentsFetch(commentsChan, date)
 
-	y.logVerbose("[COMMENTS] Successfully created comments channel")
 	return commentsChan, nil
-}
-
-func (y *Youtube) logCommentsFetchInfo(videoID string, date *time.Time) {
-	y.log.Debug("Starting comment fetch for video: %s", videoID)
-	if date != nil {
-		y.log.Debug("Filtering comments after date: %v", date)
-	}
 }
 
 func (y *Youtube) normalizeVideoID(videoID string) string {
 	if !strings.HasPrefix(videoID, "http") {
-		normalizedID := youtubeBaseURL + "/watch?v=" + videoID
-		y.logVerbose("[COMMENTS] Normalized video ID from '%s' to '%s'", videoID, normalizedID)
-		return normalizedID
+		return youtubeBaseURL + "/watch?v=" + videoID
 	}
 	return videoID
 }
 
 func (y *Youtube) setupVideoConfig(videoID string) error {
-	y.logVerbose("[COMMENTS] Getting video config")
-
 	if err := y.getConfig(videoID); err != nil {
-		err := fmt.Errorf("failed to get video config: %w", err)
-		y.logVerbose("[COMMENTS] %v", err)
-		return err
+		return fmt.Errorf("failed to get video config: %w", err)
 	}
 	return nil
 }
 
 func (y *Youtube) startCommentsFetch(commentsChan chan *types.ChatMessage, date *time.Time) {
-	y.logVerbose("[COMMENTS] Starting recursive comment fetch in goroutine")
-
-	defer func() {
-		y.logVerbose("Closing comments channel")
-		close(commentsChan)
-	}()
+	defer close(commentsChan)
 
 	if err := y.fetchCommentsRecursive(commentsChan, "", date); err != nil {
-		if !errors.Is(err, ErrNoComments) {
+		if !errors.Is(err, ErrNoComments) && !errors.Is(err, ErrNoContinuation) {
 			y.log.Error("Error fetching comments: %v", err)
 		}
 	}
 }
 
 func (y *Youtube) fetchCommentsRecursive(commentsChan chan<- *types.ChatMessage, continuation string, date *time.Time) error {
-	y.logCommentsFetchStart(continuation)
+	currentContinuation := continuation
 
-	payload, err := y.createCommentsPayload(continuation)
-	if err != nil {
-		return y.logAndWrapError(err, "failed to create payload")
+	for iteration := 0; iteration < maxCommentIterations; iteration++ {
+		if currentContinuation == "" {
+			initialContinuation := y.extractCommentsContinuation()
+			if initialContinuation == "" {
+				y.log.Debug("Could not extract initial continuation for iteration %d", iteration)
+				return fmt.Errorf("could not extract initial continuation")
+			}
+			currentContinuation = initialContinuation
+			y.log.Debug("Starting initial comment fetch (iteration %d)", iteration+1)
+		} else {
+			y.log.Debug("Fetching comments (iteration %d)", iteration+1)
+		}
+
+		payload, err := y.createCommentsPayload(currentContinuation)
+		if err != nil {
+			return fmt.Errorf("failed to create payload: %w", err)
+		}
+
+		// Fetch comments without timeout (let it complete naturally)
+		body, err := y.fetchCommentsResponse(payload)
+		if err != nil {
+			y.log.Error("Failed to fetch comments: %v", err)
+			return err
+		}
+
+		if len(body) == 0 {
+			y.log.Debug("Received empty response body, stopping comment fetch")
+			return nil
+		}
+
+		// DEBUG: Save response to file for inspection
+		if iteration == 0 {
+			debugFile := fmt.Sprintf("/tmp/youtube_comments_response_%d.json", iteration)
+			if err := os.WriteFile(debugFile, body, 0644); err == nil {
+				y.log.Debug("Saved response to %s for debugging", debugFile)
+			}
+		}
+
+		comments, err := y.extractComments(body)
+		if err != nil {
+			y.log.Debug("Error extracting comments: %v", err)
+			return err
+		}
+
+		commentCount := len(comments)
+		y.log.Debug("Extracted %d comments in iteration %d", commentCount, iteration+1)
+
+		if commentCount > 0 {
+			if shouldStop := y.sendCommentsToChannel(commentsChan, comments, date); shouldStop {
+				y.log.Debug("Date filter stopped comment fetch at iteration %d", iteration+1)
+				return nil
+			}
+		} else {
+			y.log.Debug("No comments extracted in iteration %d, checking for continuation", iteration+1)
+		}
+
+		nextContinuation, err := extractContinuationFromComments(body)
+		if err != nil {
+			if err == ErrNoContinuation {
+				y.log.Debug("No more continuation found after %d iterations, stopping comment fetch", iteration+1)
+				return nil
+			}
+			y.log.Debug("Error extracting continuation: %v", err)
+			return err
+		}
+
+		if nextContinuation == "" {
+			y.log.Debug("Empty continuation token found after %d iterations", iteration+1)
+			return nil
+		}
+
+		y.log.Debug("Found next continuation token (first 50 chars): %.50s...", nextContinuation)
+		currentContinuation = nextContinuation
+
+		// Add delay before next API call to respect rate limiting
+		if iteration < maxCommentIterations-1 {
+			time.Sleep(commentAPIDelay)
+		}
 	}
 
-	body, err := y.fetchCommentsResponse(payload)
-	if err != nil {
-		return err
-	}
-
-	comments, err := y.extractComments(body)
-	if err != nil {
-		y.logVerbose("[COMMENTS] Failed to extract comments: %v", err)
-		return err
-	}
-
-	y.logVerbose("[COMMENTS] Extracted %d comments from response", len(comments))
-
-	if shouldStop := y.sendCommentsToChannel(commentsChan, comments, date); shouldStop {
-		y.logVerbose("[COMMENTS] Stopping recursive fetch due to date filter")
-		return nil
-	}
-
-	nextContinuation, err := extractContinuationFromComments(body)
-	if err != nil {
-		y.logVerbose("[COMMENTS] No more comments to fetch")
-		return nil
-	}
-
-	y.logVerbose("[COMMENTS] Fetched %d comments, continuing with next batch", len(comments))
-	return y.fetchCommentsRecursive(commentsChan, nextContinuation, date)
-}
-
-func (y *Youtube) logCommentsFetchStart(continuation string) {
-	if continuation == "" {
-		y.log.Debug("Starting initial comment fetch")
-	} else {
-		y.log.Debug("Fetching comments with continuation: %s", continuation)
-	}
+	// Reached maximum iterations (safety limit)
+	y.log.Warn("Reached safety limit of %d iterations, stopping comment fetch", maxCommentIterations)
+	return nil
 }
 
 func (y *Youtube) createCommentsPayload(continuation string) ([]byte, error) {
 	if continuation == "" {
-		y.logVerbose("[COMMENTS] Creating initial comments payload")
-		return y.createInitialCommentsPayload()
+		continuation = y.extractCommentsContinuation()
 	}
-	y.logVerbose("[COMMENTS] Creating continuation payload with token: %s", continuation)
-	return y.createContinuationPayload(continuation)
+
+	payload := map[string]interface{}{
+		"context":      y.config.INNERTUBE_CONTEXT,
+		"continuation": continuation,
+	}
+	return json.Marshal(payload)
 }
 
 func (y *Youtube) fetchCommentsResponse(payload []byte) ([]byte, error) {
-	y.logVerbose("Sending POST request to %s with payload size: %d bytes", nextEndpoint, len(payload))
-
 	resp, err := y.executeRequest(nextEndpoint, "POST", bytes.NewReader(payload))
 	if err != nil {
-		return nil, y.logAndWrapError(err, "HTTP request failed")
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -152,50 +174,48 @@ func (y *Youtube) fetchCommentsResponse(payload []byte) ([]byte, error) {
 		}
 	}()
 
-	y.logVerbose("Received response with status: %d", resp.StatusCode)
-
 	if resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		return nil, y.logAndWrapError(err, "")
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	y.logVerbose("Reading response body")
-	return y.readResponseBody(resp)
+	var rawResponse json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return rawResponse, nil
+}
+
+// fetchCommentsResponseWithContext fetches comments with context timeout support
+func (y *Youtube) fetchCommentsResponseWithContext(ctx context.Context, payload []byte) ([]byte, error) {
+	resp, err := y.executeRequestWithContext(ctx, nextEndpoint, "POST", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			y.log.Error("Error closing response body: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var rawResponse json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return rawResponse, nil
 }
 
 func (y *Youtube) sendCommentsToChannel(commentsChan chan<- *types.ChatMessage, comments []types.ChatMessage, date *time.Time) bool {
 	for _, comment := range comments {
 		if date != nil && time.Unix(comment.Timestamp, 0).Before(*date) {
-			y.logVerbose("[COMMENTS] Reached date filter boundary, stopping")
 			return true
 		}
 		commentsChan <- &comment
 	}
 	return false
-}
-
-func (y *Youtube) logAndWrapError(err error, message string) error {
-	if message != "" {
-		err = fmt.Errorf("%s: %w", message, err)
-	}
-	y.log.Error("%v", err)
-	return err
-}
-
-func (y *Youtube) createInitialCommentsPayload() ([]byte, error) {
-	payload := map[string]interface{}{
-		"context":      y.config.INNERTUBE_CONTEXT,
-		"continuation": y.extractCommentsContinuation(),
-	}
-	return json.Marshal(payload)
-}
-
-func (y *Youtube) createContinuationPayload(continuation string) ([]byte, error) {
-	payload := map[string]interface{}{
-		"context":      y.config.INNERTUBE_CONTEXT,
-		"continuation": continuation,
-	}
-	return json.Marshal(payload)
 }
 
 func (y *Youtube) extractCommentsContinuation() string {
@@ -216,55 +236,137 @@ func (y *Youtube) extractCommentsContinuation() string {
 	}
 
 	jsonBytes := match[1]
+	continuation := y.findContinuationToken(jsonBytes)
+	if continuation != "" {
+		return continuation
+	}
+
+	return ""
+}
+
+func (y *Youtube) findContinuationToken(jsonBytes []byte) string {
 	continuationPaths := []string{
+		"engagementPanels.#.engagementPanelSectionListRenderer.header.engagementPanelTitleHeaderRenderer.menu.sortFilterSubMenuRenderer.subMenuItems.0.serviceEndpoint.continuationCommand.token",
+		"engagementPanels.#.engagementPanelSectionListRenderer.header.engagementPanelTitleHeaderRenderer.menu.sortFilterSubMenuRenderer.subMenuItems.1.serviceEndpoint.continuationCommand.token",
 		"contents.twoColumnWatchNextResults.results.results.contents.#.itemSectionRenderer.contents.#.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
 		"engagementPanels.#.engagementPanelSectionListRenderer.content.structuredDescriptionContentRenderer.items.#.videoDescriptionHeaderRenderer.commentsSectionButton.buttonRenderer.command.continuationCommand.token",
+		"contents.twoColumnWatchNextResults.results.results.contents.-1.itemSectionRenderer.contents.-1.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
+		"contents.twoColumnWatchNextResults.results.results.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
 	}
 
 	for _, path := range continuationPaths {
-		result := gjson.GetBytes(jsonBytes, path)
-		if result.Exists() && result.String() != "" {
-			return result.String()
+		token := y.extractTokenAtPath(jsonBytes, path)
+		if token != "" {
+			return token
 		}
 	}
 
 	return ""
 }
 
-func (y *Youtube) readResponseBody(resp *http.Response) ([]byte, error) {
-	decoder := json.NewDecoder(resp.Body)
-	var rawResponse json.RawMessage
-	if err := decoder.Decode(&rawResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+func (y *Youtube) extractTokenAtPath(jsonBytes []byte, path string) string {
+	result := gjson.GetBytes(jsonBytes, path)
+	if !result.Exists() {
+		return ""
 	}
-	return rawResponse, nil
+
+	if result.IsArray() {
+		arr := result.Array()
+		for _, item := range arr {
+			if item.IsArray() {
+				innerArr := item.Array()
+				for _, innerItem := range innerArr {
+					token := innerItem.String()
+					if token != "" && token != "undefined" {
+						return token
+					}
+				}
+			} else {
+				token := item.String()
+				if token != "" && token != "undefined" {
+					return token
+				}
+			}
+		}
+	} else {
+		token := result.String()
+		if token != "" && token != "undefined" {
+			return token
+		}
+	}
+
+	return ""
 }
 
-func (y *Youtube) extractComments(data []byte) ([]types.ChatMessage, error) {
-	y.logVerbose("[COMMENTS] Starting comment extraction from %d bytes of data", len(data))
+// ============ PERBAIKAN UTAMA ============
 
+func (y *Youtube) extractComments(data []byte) ([]types.ChatMessage, error) {
 	items, err := y.findCommentItems(data)
 	if err != nil {
 		return nil, err
 	}
 
-	y.logVerbose("[COMMENTS] Processing %d comment items", len(items))
-	comments := y.parseCommentItems(items)
+	comments := make([]types.ChatMessage, 0, 20)
+	for _, item := range items {
+		itemBytes, _ := json.Marshal(item)
+		comment := y.parseCommentItem(itemBytes)
+		if comment == nil {
+			continue
+		}
 
-	y.logVerbose("[COMMENTS] Successfully extracted %d comments total", len(comments))
+		comments = append(comments, *comment)
+
+		// Check for and extract replies
+		if comment.ReplyCount > 0 {
+			y.log.Debug("Comment %s has %d replies, attempting to extract", comment.ID, comment.ReplyCount)
+			replies, err := y.extractReplies(itemBytes)
+			if err == nil && len(replies) > 0 {
+				y.log.Debug("Successfully extracted %d replies for comment %s", len(replies), comment.ID)
+				comments = append(comments, replies...)
+			} else if err != nil {
+				y.log.Debug("Failed to extract replies for comment %s: %v", comment.ID, err)
+			} else {
+				y.log.Debug("No replies extracted for comment %s despite ReplyCount=%d", comment.ID, comment.ReplyCount)
+			}
+		}
+	}
+
 	return comments, nil
 }
 
+// DIPERBAIKI: Filter continuation items agar tidak diparsing sebagai comment
 func (y *Youtube) findCommentItems(data []byte) ([]interface{}, error) {
+	// Check new format first
+	newFormatPath := "frameworkUpdates.entityBatchUpdate.mutations"
+	result := gjson.GetBytes(data, newFormatPath)
+	if result.Exists() {
+		var mutations []interface{}
+		if err := json.Unmarshal([]byte(result.Raw), &mutations); err == nil && len(mutations) > 0 {
+			var commentItems []interface{}
+			for _, mutation := range mutations {
+				mutationBytes, _ := json.Marshal(mutation)
+				if gjson.GetBytes(mutationBytes, "payload.commentEntityPayload").Exists() {
+					commentItems = append(commentItems, mutation)
+				}
+			}
+			if len(commentItems) > 0 {
+				return commentItems, nil
+			}
+		}
+	}
+
+	// Search paths for different response structures
 	contentPaths := []string{
 		"onResponseReceivedEndpoints.#.reloadContinuationItemsCommand.continuationItems",
 		"onResponseReceivedEndpoints.#.appendContinuationItemsAction.continuationItems",
 		"continuationContents.itemSectionContinuation.contents",
+		"continuationContents.commentRepliesContinuation.contents", // For reply responses
+		"onResponseReceivedEndpoints.0.reloadContinuationItemsCommand.continuationItems",
+		"onResponseReceivedEndpoints.0.appendContinuationItemsAction.continuationItems",
+		"onResponseReceivedEndpoints.1.appendContinuationItemsAction.continuationItems",
 	}
 
 	for _, path := range contentPaths {
-		y.logVerbose("[COMMENTS] Trying content path: %s", path)
-
 		result := gjson.GetBytes(data, path)
 		if !result.Exists() {
 			continue
@@ -272,48 +374,37 @@ func (y *Youtube) findCommentItems(data []byte) ([]interface{}, error) {
 
 		var items []interface{}
 		if err := json.Unmarshal([]byte(result.Raw), &items); err == nil && len(items) > 0 {
-			y.logVerbose("[COMMENTS] Found %d items using path: %s", len(items), path)
-			return items, nil
+			// PERBAIKAN: Filter out continuation items - only return actual comments
+			var commentItems []interface{}
+			for _, item := range items {
+				itemBytes, _ := json.Marshal(item)
+
+				// Skip if this is a continuation item
+				if gjson.GetBytes(itemBytes, "continuationItemRenderer").Exists() {
+					continue
+				}
+
+				// Include if it has comment data
+				if gjson.GetBytes(itemBytes, "commentThreadRenderer").Exists() ||
+					gjson.GetBytes(itemBytes, "commentRenderer").Exists() {
+					commentItems = append(commentItems, item)
+				}
+			}
+
+			if len(commentItems) > 0 {
+				return commentItems, nil
+			}
 		}
 	}
 
-	y.logVerbose("[COMMENTS] No comment items found in any path, returning ErrNoComments")
 	return nil, ErrNoComments
 }
 
-func (y *Youtube) parseCommentItems(items []interface{}) []types.ChatMessage {
-	comments := make([]types.ChatMessage, 0, 20)
-
-	for i, item := range items {
-		y.logVerbose("[COMMENTS] Processing item %d/%d", i+1, len(items))
-
-		itemBytes, _ := json.Marshal(item)
-		comment := y.parseCommentItem(itemBytes)
-		if comment == nil {
-			y.logVerbose("[COMMENTS] Failed to parse item %d", i)
-			continue
-		}
-
-		y.logVerbose("[COMMENTS] Parsed comment: ID=%s, Author=%s", comment.ID, comment.Author.Name)
-		comments = append(comments, *comment)
-
-		replies := y.tryExtractReplies(itemBytes, comment.ID)
-		comments = append(comments, replies...)
-	}
-
-	return comments
-}
-
-func (y *Youtube) tryExtractReplies(itemBytes []byte, commentID string) []types.ChatMessage {
-	replies, err := y.extractReplies(itemBytes)
-	if err == nil {
-		y.logVerbose("[COMMENTS] Found %d replies for comment %s", len(replies), commentID)
-		return replies
-	}
-	return nil
-}
-
 func (y *Youtube) parseCommentItem(data []byte) *types.ChatMessage {
+	if gjson.GetBytes(data, "payload.commentEntityPayload").Exists() {
+		return y.parseCommentEntityPayload(data)
+	}
+
 	rendererPath := "commentThreadRenderer.comment.commentRenderer"
 	if !gjson.GetBytes(data, rendererPath).Exists() {
 		rendererPath = "commentRenderer"
@@ -367,6 +458,82 @@ func (y *Youtube) parseCommentItem(data []byte) *types.ChatMessage {
 	}
 }
 
+func (y *Youtube) parseCommentEntityPayload(data []byte) *types.ChatMessage {
+	payload := gjson.GetBytes(data, "payload.commentEntityPayload")
+	if !payload.Exists() {
+		return nil
+	}
+
+	commentID := payload.Get("properties.commentId").String()
+	if commentID == "" {
+		return nil
+	}
+
+	message := payload.Get("properties.content.content").String()
+
+	authorName := payload.Get("author.displayName").String()
+	authorID := payload.Get("author.channelId").String()
+	authorThumbnail := payload.Get("author.avatarThumbnailUrl").String()
+	isVerified := payload.Get("author.isVerified").Bool()
+	isCreator := payload.Get("author.isCreator").Bool()
+
+	timestampText := payload.Get("properties.publishedTime").String()
+	timestamp := parseRelativeTime(timestampText)
+
+	likeCountStr := payload.Get("toolbar.likeCountLiked").String()
+	if likeCountStr == "" {
+		likeCountStr = payload.Get("toolbar.likeCountNotliked").String()
+	}
+	likes := parseCount(likeCountStr)
+
+	replyCountStr := payload.Get("toolbar.replyCount").String()
+	replyCount := parseCount(replyCountStr)
+
+	isPinned := payload.Get("properties.isPinned").Bool()
+
+	replyLevel := payload.Get("properties.replyLevel").Int()
+	parent := ""
+	if replyLevel > 0 {
+		parent = ""
+	}
+
+	badges := []types.Badge{}
+	if isVerified {
+		badges = append(badges, types.Badge{
+			Tooltip: "Verified",
+			Label:   "Verified",
+			IconURL: "CHECK_CIRCLE_THICK",
+		})
+	}
+	if isCreator {
+		badges = append(badges, types.Badge{
+			Tooltip: "Channel Owner",
+			Label:   "Channel Owner",
+			IconURL: "OWNER",
+		})
+	}
+
+	return &types.ChatMessage{
+		ID:      commentID,
+		Message: message,
+		Author: types.Author{
+			ID:         authorID,
+			Name:       authorName,
+			Thumbnail:  authorThumbnail,
+			URL:        fmt.Sprintf(youtubeChannelURL, authorID),
+			IsUploader: isCreator,
+			IsVerified: isVerified,
+			Badges:     badges,
+		},
+		IsPinned:    isPinned,
+		IsFavorited: isCreator,
+		ReplyCount:  int(replyCount),
+		LikeCount:   likes,
+		Timestamp:   timestamp,
+		Parent:      parent,
+	}
+}
+
 func (y *Youtube) extractCommentText(data []byte, basePath string) string {
 	runs := gjson.GetBytes(data, basePath+".contentText.runs")
 	if !runs.Exists() {
@@ -404,29 +571,153 @@ func (y *Youtube) extractCommentBadges(data []byte, basePath string) []types.Bad
 	return badges
 }
 
-func (y *Youtube) extractReplies(data []byte) ([]types.ChatMessage, error) {
-	repliesPath := "commentThreadRenderer.replies.commentRepliesRenderer.contents"
-	repliesResult := gjson.GetBytes(data, repliesPath)
-	if !repliesResult.Exists() {
-		return nil, fmt.Errorf("no replies")
+// DIPERBAIKI: Tambah path untuk continuation dalam replies
+func (y *Youtube) extractReplyContinuation(data []byte) string {
+	paths := []string{
+		// Direct path - sesuai JSON structure yang Anda berikan
+		"commentThreadRenderer.replies.commentRepliesRenderer.continuations.0.nextContinuationData.continuation",
+		"commentThreadRenderer.replies.commentRepliesRenderer.contents.#.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
+		"commentThreadRenderer.replies.commentRepliesRenderer.continuationItems.#.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
+		"commentThreadRenderer.replies.continuationItemRenderer.continuationEndpoint.continuationCommand.token",
 	}
 
-	var replies []types.ChatMessage
-	repliesResult.ForEach(func(_, value gjson.Result) bool {
-		replyBytes := []byte(value.Raw)
-		reply := y.parseCommentItem(replyBytes)
-		if reply != nil {
-			parentID := gjson.GetBytes(data, "commentThreadRenderer.comment.commentRenderer.commentId").String()
-			reply.Parent = parentID
-			replies = append(replies, *reply)
+	for _, path := range paths {
+		result := gjson.GetBytes(data, path)
+		if result.Exists() && result.String() != "" {
+			return result.String()
 		}
-		return true
-	})
+	}
+
+	return ""
+}
+
+// DIPERBAIKI: Extract continuation SEBELUM processing items
+func (y *Youtube) fetchRepliesRecursive(parentID, continuation string) ([]types.ChatMessage, error) {
+	var allReplies []types.ChatMessage
+	currentContinuation := continuation
+
+	for iteration := 0; iteration < maxReplyIterations && currentContinuation != ""; iteration++ {
+		y.log.Debug("Fetching replies for parent %s (iteration %d)", parentID, iteration+1)
+
+		payload, err := y.createCommentsPayload(currentContinuation)
+		if err != nil {
+			return allReplies, fmt.Errorf("failed to create replies payload: %w", err)
+		}
+
+		// Fetch replies without timeout (let it complete naturally)
+		body, err := y.fetchCommentsResponse(payload)
+		if err != nil {
+			y.log.Error("Failed to fetch replies for parent %s: %v", parentID, err)
+			return allReplies, fmt.Errorf("failed to fetch replies: %w", err)
+		}
+
+		// PERBAIKAN: Extract continuation FIRST before processing items
+		nextContinuation, err := extractContinuationFromComments(body)
+		if err != nil && err != ErrNoContinuation {
+			y.log.Debug("Error extracting reply continuation: %v", err)
+		}
+
+		// Now process the reply items
+		items, err := y.findCommentItems(body)
+		if err != nil {
+			if err == ErrNoComments {
+				y.log.Debug("No more reply items found for parent %s", parentID)
+				break
+			}
+			return allReplies, err
+		}
+
+		y.log.Debug("Found %d reply items for parent %s (iteration %d)", len(items), parentID, iteration+1)
+
+		for _, item := range items {
+			itemBytes, _ := json.Marshal(item)
+			reply := y.parseCommentItem(itemBytes)
+			if reply != nil {
+				reply.Parent = parentID
+				allReplies = append(allReplies, *reply)
+			}
+		}
+
+		// Update continuation for next iteration
+		if nextContinuation == "" || err == ErrNoContinuation {
+			y.log.Debug("No more reply continuation for parent %s after %d iterations", parentID, iteration+1)
+			break
+		}
+		currentContinuation = nextContinuation
+
+		// Add delay before next API call
+		if iteration < maxReplyIterations-1 && currentContinuation != "" {
+			time.Sleep(replyAPIDelay)
+		}
+	}
+
+	y.log.Debug("Total replies fetched for parent %s: %d", parentID, len(allReplies))
+	return allReplies, nil
+}
+
+func (y *Youtube) extractReplies(data []byte) ([]types.ChatMessage, error) {
+	hasThreadRenderer := gjson.GetBytes(data, "commentThreadRenderer").Exists()
+	if !hasThreadRenderer {
+		return nil, fmt.Errorf("not commentThreadRenderer format")
+	}
+
+	parentID := gjson.GetBytes(data, "commentThreadRenderer.comment.commentRenderer.commentId").String()
+	if parentID == "" {
+		return nil, fmt.Errorf("no parent comment ID")
+	}
+
+	y.log.Debug("Extracting replies for comment: %s", parentID)
+
+	var replies []types.ChatMessage
+
+	// Check if there are replies in the direct renderer format
+	repliesPath := "commentThreadRenderer.replies.commentRepliesRenderer"
+	if gjson.GetBytes(data, repliesPath).Exists() {
+		contentsPath := "commentThreadRenderer.replies.commentRepliesRenderer.contents"
+		contentsResult := gjson.GetBytes(data, contentsPath)
+		contentsResult.ForEach(func(_, value gjson.Result) bool {
+			if value.Get("commentRenderer").Exists() {
+				replyBytes := []byte(value.Raw)
+				reply := y.parseCommentItem(replyBytes)
+				if reply != nil {
+					reply.Parent = parentID
+					replies = append(replies, *reply)
+				}
+			}
+			return true
+		})
+
+		// Check for continuation within the replies renderer
+		continuation := y.extractReplyContinuation(data)
+		if continuation != "" {
+			y.log.Debug("Fetching more replies for comment %s using continuation", parentID)
+			moreReplies, err := y.fetchRepliesRecursive(parentID, continuation)
+			if err == nil {
+				replies = append(replies, moreReplies...)
+			} else {
+				y.log.Debug("Error fetching more replies: %v", err)
+			}
+		}
+	} else {
+		// Check if there's a continuation for replies directly
+		continuation := y.extractReplyContinuation(data)
+
+		if continuation != "" {
+			y.log.Debug("Found reply continuation for comment %s, fetching replies", parentID)
+			moreReplies, err := y.fetchRepliesRecursive(parentID, continuation)
+			if err == nil {
+				replies = append(replies, moreReplies...)
+			} else {
+				y.log.Debug("Error fetching replies from continuation: %v", err)
+			}
+		}
+	}
 
 	return replies, nil
 }
 
-// timeUnitMultipliers maps time unit prefixes to their duration in hours
+// ============ HELPER FUNCTIONS ============
+
 var timeUnitMultipliers = map[string]time.Duration{
 	"second": time.Second,
 	"minute": time.Minute,
@@ -437,7 +728,6 @@ var timeUnitMultipliers = map[string]time.Duration{
 	"year":   365 * 24 * time.Hour,
 }
 
-// parseRelativeTime converts a relative time string (e.g., "2 hours ago") to Unix timestamp
 func parseRelativeTime(timeStr string) int64 {
 	now := time.Now()
 	timeStr = strings.ToLower(strings.TrimSpace(timeStr))
@@ -464,7 +754,6 @@ func parseRelativeTime(timeStr string) int64 {
 	return now.Add(-time.Duration(value) * duration).Unix()
 }
 
-// findTimeUnitDuration returns the duration for a given time unit string
 func findTimeUnitDuration(unit string) time.Duration {
 	for prefix, duration := range timeUnitMultipliers {
 		if strings.HasPrefix(unit, prefix) {

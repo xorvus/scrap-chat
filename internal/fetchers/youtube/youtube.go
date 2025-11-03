@@ -33,6 +33,8 @@ type Youtube struct {
 	streamMutex        sync.RWMutex
 	seenMessageIDs     map[string]time.Time
 	lastCleanupTime    time.Time
+	lastRequestTime    time.Time
+	requestMutex       sync.Mutex
 }
 
 func New(ctx *context.Context, verbose bool) *Youtube {
